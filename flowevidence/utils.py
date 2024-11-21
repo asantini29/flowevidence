@@ -1,11 +1,10 @@
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
-import torch.autograd.profiler as profiler
 from nflows.flows import Flow
 from nflows.distributions import StandardNormal
-from nflows.transforms import MaskedAffineAutoregressiveTransform, CompositeTransform, ReversePermutation, AffineCouplingTransform, RandomPermutation
-from nflows.nn.nets import MLP, ResidualNet
+from nflows.transforms import MaskedAffineAutoregressiveTransform, CompositeTransform, AffineCouplingTransform, RandomPermutation
+from nflows.nn.nets import ResidualNet
 import numpy as np
 import matplotlib.pyplot as plt
 from corner import corner

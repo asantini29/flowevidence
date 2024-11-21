@@ -12,12 +12,14 @@ try:
     from eryn.utils import get_integrated_act
     eryn_here = True
 except (ImportError, ModuleNotFoundError):
+    logging.warning("Eryn is not installed. Please install Eryn to use the ErynEvidenceFlow class.")
     eryn_here = False
 
 try:
-    import pysco
+    from pysco.eryn import SamplesLoader
     pysco_here = True
 except (ImportError, ModuleNotFoundError):
+    logging.warning("Pysco is not installed. Please install Pysco to use the ErynEvidenceFlow class.")
     pysco_here = False
 
 __all__ = ['FlowContainer', 'EvidenceFlow', 'ErynEvidenceFlow']
@@ -387,7 +389,7 @@ class ErynEvidenceFlow(EvidenceFlow):
     
     Args:
         backend (str or HDFBackend): The backend to load the samples from.
-        loader (DataLoader): The DataLoader object to load the samples from.
+        loader (SamplesLoader): A pysco.eryn.SamplesLoader object to load the samples from.
         ess (int): The effective sample size. Default is 1e4.
         num_flow_steps (int): Number of flow steps in the model. Default is 5.
         use_nvp (bool): Whether to use NVP architecture. Default is False.
@@ -401,7 +403,7 @@ class ErynEvidenceFlow(EvidenceFlow):
 
     def __init__(self,
                 backend: str | HDFBackend = None,
-                loader: pysco.eryn.DataLoader = None,
+                loader: SamplesLoader = None,
                 ess: int = int(1e4),
                 num_flow_steps: int = 5, 
                 use_nvp: bool = False, 
@@ -423,7 +425,7 @@ class ErynEvidenceFlow(EvidenceFlow):
     
         elif loader is None and backend is not None:
             if pysco_here:
-                loader = pysco.eryn.DataLoader(backend)
+                loader = SamplesLoader(backend)
                 samples, logL, logP = loader.load(ess=ess, squeeze=True)
             else:
                 if isinstance(backend, str):
