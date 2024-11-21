@@ -1,0 +1,46 @@
+site_name: FlowEvidence Documentation
+
+nav:
+  - Home: index.md
+  - Installation: installation.md
+  - Usage: usage.md
+  - API Documentation:
+      - Utils: 
+        - api/utils.md
+      - Core:
+        - api/core.md
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          selection:
+            docstring_style: google  # Specify docstring style (google, numpy, or restructuredtext)
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: pink
+      toggle:
+        icon: material/weather-night
+        name: "Switch to dark mode"
+    - scheme: slate
+      primary: teal
+      accent: amber
+      toggle:
+        icon: material/weather-sunny
+        name: "Switch to light mode"
+  features:
+    - navigation.tabs
+    - navigation.top
+    - navigation.sections
+    - navigation.expand
+
+markdown_extensions:
+  - admonition
+  - toc
+  - pymdownx.superfences
+  - pymdownx.highlight
