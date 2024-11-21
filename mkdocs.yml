@@ -1,4 +1,6 @@
 site_name: FlowEvidence Documentation
+repo_url: https://github.com/asantini29/flowevidence
+edit_uri: edit/main/docs/
 
 nav:
   - Home: index.md
@@ -9,6 +11,7 @@ nav:
         - api/utils.md
       - Core:
         - api/core.md
+        
 
 plugins:
   - search
@@ -17,9 +20,17 @@ plugins:
         python:
           selection:
             docstring_style: google  # Specify docstring style (google, numpy, or restructuredtext)
+  - git-revision-date-localized:
+      enable_creation_date: true
+  - tags
+
 
 theme:
   name: material
+  icon:
+    repo: fontawesome/brands/git-alt
+    edit: material/pencil 
+    view: material/eye
   palette:
     - scheme: default
       primary: indigo
@@ -38,9 +49,19 @@ theme:
     - navigation.top
     - navigation.sections
     - navigation.expand
+    - content.action.edit
 
 markdown_extensions:
   - admonition
   - toc
   - pymdownx.superfences
   - pymdownx.highlight
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/asantini29
+    - icon: fontawesome/solid/paper-plane
+      link: mailto:alessandro.santini@aei.mpg.de
+  version:
+    provider: mike

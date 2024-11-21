@@ -5,10 +5,11 @@ from typing import Union, Optional
 import logging
 import numpy as np
 
-from .utils import * 
+from .utils import *
 
 try:
-    import eryn
+    from eryn.backends import HDFBackend
+    from eryn.utils import get_integrated_act
     eryn_here = True
 except (ImportError, ModuleNotFoundError):
     eryn_here = False
@@ -19,6 +20,7 @@ try:
 except (ImportError, ModuleNotFoundError):
     pysco_here = False
 
+__all__ = ['FlowContainer', 'EvidenceFlow', 'ErynEvidenceFlow']
 
 class FlowContainer:
     """
@@ -47,7 +49,7 @@ class FlowContainer:
                 num_dims: int, 
                 num_flow_steps: int = 5, 
                 use_nvp: bool = False,
-                device: Union[str, torch.device] = 'cpu',
+                device: str | torch.device = 'cpu',
                 dtype: torch.dtype = torch.float64,
                 verbose: bool = False
                 ):
@@ -205,7 +207,7 @@ class EvidenceFlow(FlowContainer):
     A class for computing the log evidence (logZ) using a trained flow model and the posterior values associated with MCMC samples.
 
     Args:
-        num_flow_steps (int): Number of flow steps.
+        num_flow_steps (int): Number of flow steps. Defaults to 5.
         use_nvp (bool, optional): Whether to use NVP (Neural Variational Processes). Defaults to False.
         device (str or torch.device, optional): Device to use for computation. Defaults to 'cpu'.
         verbose (bool, optional): Whether to print verbose output. Defaults to False.
@@ -228,12 +230,12 @@ class EvidenceFlow(FlowContainer):
     """
 
     def __init__(self, 
-                 num_flow_steps: int, 
+                 posterior_samples: np.ndarray | dict = None,
+                 logposterior_values: np.ndarray = None,
+                 num_flow_steps: int = 5, 
                  use_nvp: bool = False, 
                  device: str | torch.device = 'cpu', 
                  verbose: bool = False,
-                 posterior_samples: np.ndarray | dict = None,
-                 logposterior_values: np.ndarray = None,
                  dtype: torch.dtype = torch.float64,
                  Nbatches: int = 100,
                  split_ratio: float = 0.8,
@@ -351,16 +353,19 @@ class EvidenceFlow(FlowContainer):
             load_kwargs (dict): Keyword arguments for loading the flow model. Refer to the documentation for the `load` method.
             train_kwargs (dict): Keyword arguments for training the flow model. Refer to the documentation for the `train` method.
             num_draws (int, optional): The number of samples to draw. Defaults to 10000.
+        
         Returns:
-            np.ndarray: The drawn samples.
+            samples (np.ndarray): The drawn samples transformed in the original space.
         """
         self._sanity_check_flow(load_kwargs, train_kwargs)
         samples = self.flow.sample(num_draws).cpu().detach().numpy()
+
         return self._from_latent_space(samples, self.q1, self.q2)
     
     def _sanity_check_flow(self, load_kwargs: dict = {}, train_kwargs: dict = {}):
         """
         Checks if the flow model is loaded or trained and loads or trains it if necessary.
+        
         Args:
             load_kwargs (dict): Keyword arguments for loading the flow model. Refer to the documentation for the `load` method.
             train_kwargs (dict): Keyword arguments for training the flow model. Refer to the documentation for the `train` method.
@@ -377,12 +382,130 @@ class EvidenceFlow(FlowContainer):
             self.train(**train_kwargs)
 
 class ErynEvidenceFlow(EvidenceFlow):
+    """
+    Wrapper class for using the ``EvidenceFlow`` class directly with a backend from the ``Eryn`` mcmc sampler.
     
-    def __init__():
+    Args:
+        backend (str or HDFBackend): The backend to load the samples from.
+        loader (DataLoader): The DataLoader object to load the samples from.
+        ess (int): The effective sample size. Default is 1e4.
+        num_flow_steps (int): Number of flow steps in the model. Default is 5.
+        use_nvp (bool): Whether to use NVP architecture. Default is False.
+        device (str or torch.device): Device to run the model on. Default is 'cpu'.
+        verbose (bool): Whether to print verbose output during training. Default is False.
+        dtype (torch.dtype): Data type for tensors. Default is torch.float64.
+        Nbatches (int): Number of batches. Default is 100.
+        split_ratio (float): Ratio to split data into training and validation sets. Default is 0.8.
+        conversion_method (str): Method for data conversion to the flow latent space ('normalize' or 'standardize'). Default is 'normalize'.
+    """
+
+    def __init__(self,
+                backend: str | HDFBackend = None,
+                loader: pysco.eryn.DataLoader = None,
+                ess: int = int(1e4),
+                num_flow_steps: int = 5, 
+                use_nvp: bool = False, 
+                device: str | torch.device = 'cpu', 
+                verbose: bool = False,
+                dtype: torch.dtype = torch.float64,
+                Nbatches: int = 100,
+                split_ratio: float = 0.8,
+                conversion_method: str = 'normalize'):
+        
+        
+        
         if not eryn_here:
             raise ImportError("Eryn is not installed. Please install Eryn to use this class, or \
                               use the EvidenceFlow class instead.")
         
-        #todo: decide how to use the loaders from pysco and the backend from eryn
+        if backend is None and loader is None:
+            raise ValueError("Either a backend or a loader must be provided.")
+    
+        elif loader is None and backend is not None:
+            if pysco_here:
+                loader = pysco.eryn.DataLoader(backend)
+                samples, logL, logP = loader.load(ess=ess, squeeze=True)
+            else:
+                if isinstance(backend, str):
+                    backend = HDFBackend(backend)
 
-        raise NotImplementedError
+                samples, logP = self._load_samples_posterior(backend, ess)
+        
+        else:
+            samples, logL, logP = loader.load(ess=ess, squeeze=True)
+
+        super().__init__(posterior_samples=samples, 
+                         logposterior_values=logP, 
+                         num_flow_steps=num_flow_steps, 
+                         use_nvp=use_nvp, 
+                         device=device, 
+                         verbose=verbose, 
+                         dtype=dtype, 
+                         Nbatches=Nbatches, 
+                         split_ratio=split_ratio, 
+                         conversion_method=conversion_method)
+        
+    def _compute_discard_thin(self, samples, ess=int(1e4)):
+        """
+        Compute the number of samples to discard and thin. Snippet adapted from from: `https://github.com/asantini29/pysco`
+
+        Args:
+            ess (int): Effective sample size. Default is 1e4.
+        
+        Returns:    
+            discard (int): The number of samples to discard.
+            thin (int): The thinning factor.
+        """
+
+        tau = {}
+        for name in samples.keys():
+            chain = samples[name]
+            nsteps, ntemps, nw, nleaves, ndims = chain.shape
+            chain = chain.reshape(nsteps, ntemps, nw, nleaves * ndims)
+            tau[name] = get_integrated_act(chain, average=True)
+        
+        taus_all = []
+
+        for name in tau.keys():
+            tau_here = np.max(tau[name])
+            if np.isfinite(tau_here):
+                taus_all.append(tau_here)
+        
+        thin = int(np.max(taus_all))
+        print("Number of steps: ", nsteps)
+
+        ess = int(ess)
+        N_keep = int(np.ceil(ess * self.thin / nw))
+        print("Number of samples to keep: ", N_keep)
+        discard = max(5000, self.backend.iteration - N_keep)
+
+        return discard, thin
+    
+    def _load_samples_posterior(self, backend, ess=None):
+        """
+        Load the samples from the backend. If the effective sample size is provided, the number of samples to discard and thin is computed.
+        This is NOT compatible with reversible jump MCMC yet.
+
+        Args:
+            backend (HDFBackend): The backend to load the samples from.
+            ess (int, optional): The effective sample size. Defaults to None.
+
+        Returns:
+            samples_out (dict): The samples.
+            logP (np.ndarray): The log posterior values.
+        """
+
+        samples = backend.get_chain()
+        samples_out = {}
+        if ess:
+            discard, thin = self._compute_discard_thin(samples, ess)
+        else:
+            discard, thin = 0, 1
+        
+        for name in samples.keys():
+            ns, nt, nw, nl, nd = samples[name].shape
+            samples_out[name] = np.squeeze(samples[name][discard::thin, 0]).reshape(-1, nd) #take the first temperature chain and flatten the rest
+        
+        logP = backend.get_log_posterior(discard=discard, thin=thin)[:, 0].flatten()
+
+        return samples_out, logP

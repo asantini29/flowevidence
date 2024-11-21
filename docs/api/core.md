@@ -2,4 +2,7 @@
 
 ::: flowevidence.core
     options:
-        show_source: true
+            members:
+                - FlowContainer
+                - EvidenceFlow
+                - ErynEvidenceFlow
