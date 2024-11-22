@@ -7,11 +7,10 @@ nav:
   - Installation: installation.md
   - Usage: usage.md
   - API Documentation:
-      - Utils: 
-        - api/utils.md
       - Core:
         - api/core.md
-        
+      - Utils: 
+        - api/utils.md
 
 plugins:
   - search
