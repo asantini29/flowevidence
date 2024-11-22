@@ -1,7 +1,10 @@
+# coding: utf-8
+
+import os
 import torch
 from torch.utils.data import DataLoader
 
-from typing import Union, Optional
+from typing import Union, Optional, Callable
 import logging
 import numpy as np
 
@@ -29,7 +32,6 @@ class FlowContainer:
     A container for managing and training a flow-based model.
     
     Args:
-        num_dims (int): Number of dimensions for the flow model.
         num_flow_steps (int): Number of flow steps in the model. Default is 5.
         use_nvp (bool): Whether to use RealNVP architecture. Default is False.
         device (Union[str, torch.device]): Device to run the model on. Default is 'cpu'.
@@ -37,7 +39,7 @@ class FlowContainer:
         verbose (bool): Whether to print verbose output during training. Default is False.
 
     Methods:
-        build_flow():
+        build_flow(num_dims=None):
             Builds the flow model using the specified parameters.
         load_data(train_loader, val_loader=None):
             Loads the training and validation data loaders.
@@ -48,7 +50,6 @@ class FlowContainer:
     """
     
     def __init__(self, 
-                num_dims: int, 
                 num_flow_steps: int = 5, 
                 use_nvp: bool = False,
                 device: str | torch.device = 'cpu',
@@ -62,23 +63,24 @@ class FlowContainer:
         setup_logging(verbose)
         self.verbose = verbose
 
-        self.num_dims = num_dims
         self.num_flow_steps = num_flow_steps
         self.use_nvp = use_nvp
 
-        self.flow = None
         self.train_loader = None
         self.val_loader = None
 
-    def build_flow(self):
+    def build_flow(self, num_dims: Optional[int] = None):
         """
         Builds the flow model using the specified parameters.
         This method initializes the flow model by calling the `get_flow` function with the 
         number of dimensions, number of flow steps, whether to use NVP (Non-volume Preserving) 
         transformations, and the device to be used for computation.
+
+        Args:  
+            num_dims (int, optional): The number of dimensions for the flow model. Defaults to None.
         """
 
-        self.flow = get_flow(self.num_dims, self.num_flow_steps, use_nvp=self.use_nvp, device=self.device)
+        self.flow = get_flow(num_dims, self.num_flow_steps, use_nvp=self.use_nvp, device=self.device)
 
     def load_data(self, train_loader: DataLoader, val_loader: Optional[DataLoader] = None):
         """
@@ -91,7 +93,17 @@ class FlowContainer:
         self.train_loader = train_loader
         self.val_loader = val_loader
 
-    def train(self, start_epoch: int = 0, epochs: int = 1000, lr: float = 1e-3, lambdaL2: Optional[float] = None, path: str = './', filename: str = 'trainedflow.pth', target_distribution: Optional[np.ndarray] = None):
+    def train(self, 
+              start_epoch: int = 0, 
+              epochs: int = 1000, 
+              lr: float = 1e-3, 
+              lambdaL2: Optional[float] = None,
+              early_stopping: bool | Callable = False,
+              stopping_kwargs: Optional[dict] = {},
+              path: str = './', 
+              filename: str = 'trainedflow.pth', 
+              target_distribution: Optional[np.ndarray] = None
+              ):
         """
         Train the flow model.
 
@@ -100,10 +112,14 @@ class FlowContainer:
             epochs (int, optional): The number of epochs to train the model. Defaults to 1000.
             lr (float, optional): The learning rate for the optimizer. Defaults to 1e-3.
             lambdaL2 (Optional[float], optional): The L2 regularization parameter. Defaults to None.
+            early_stopping (Optional[bool], optional): Whether to use early stopping. Defaults to False.
+            stopping_kwargs (Optional[dict], optional): Keyword arguments for early stopping. Defaults to {}.
             path (str, optional): The path to save the trained model and diagnostics. Defaults to './'.
             filename (str, optional): The filename for the saved model. Defaults to 'trainedflow.pth'.
             target_distribution (Optional[np.ndarray], optional): The target distribution for diagnostics. Defaults to None.
         """
+
+        logging.info("Training flow with {} flow steps".format(self.num_flow_steps))
         
         optimizer = torch.optim.Adam(self.flow.parameters(), lr=lr)
         scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=100, gamma=0.5)
@@ -112,14 +128,25 @@ class FlowContainer:
         train_losses = []
         val_losses = []
 
+        stopping_fn = None
+        converged = False
+        if isinstance(early_stopping, bool) and early_stopping:
+            stopping_fn = EarlyStopping(**stopping_kwargs)
+        elif isinstance(early_stopping, Callable):
+            stopping_fn = early_stopping
+        
+        else:
+            logging.info("Early stopping disabled")
+            
         trainedpath = path + filename
         savepath = path + "diagnostic/"
+        os.makedirs(savepath, exist_ok=True)
 
-        logging.debug("Training started")
-        logging.debug(f"Saving diagnostics to {savepath}")
+        logging.info("Training started")
+        logging.info(f"Saving diagnostics to {savepath}")
 
         if epochs < start_epoch:
-            logging.debug("Resuming training")
+            logging.info("Resuming training")
             epochs = start_epoch + epochs
 
         for epoch in range(start_epoch, epochs):
@@ -127,8 +154,21 @@ class FlowContainer:
             scheduler.step()
             val_loss = self._validate_one_epoch(lambdaL2) if self.val_loader else None
 
-            if self.verbose and epoch % 100 == 0:
-                self._log_epoch(epoch, train_loss, val_loss, epochs_losses, train_losses, val_losses, target_distribution, savepath)
+            if stopping_fn:
+                if stopping_fn(val_loss):
+                    logging.info(f"Early stopping at epoch {epoch}")
+                    converged = True
+                    break
+
+            if epoch % 100 == 0:
+                if self.verbose:
+                    self._log_epoch(epoch, train_loss, val_loss, epochs_losses, train_losses, val_losses, target_distribution, savepath)
+                    logging.info("Saving model @ epoch {}".format(epoch))
+
+                self._save_model(epoch, optimizer, scheduler, trainedpath)
+
+        if stopping_fn and not converged:
+            logging.warning("Early stopping did not trigger")
 
         self._save_model(epochs, optimizer, scheduler, trainedpath)
         self._save_diagnostics(epochs_losses, train_losses, val_losses, target_distribution, savepath)
@@ -192,6 +232,14 @@ class FlowContainer:
             logging.debug("Diagnostics saved")
 
     def load(self, path: str = './', filename: str = 'trainedflow.pth'):
+        """
+        Load a trained flow model from the specified path.
+
+        Args:
+            path (str, optional): The path to the saved model. Defaults to './'.
+            filename (str, optional): The filename of the saved model. Defaults to 'trainedflow.pth'.
+        """
+
         try:
             loadpath = path + filename
             logging.debug(f"Loading flow from {loadpath}")
@@ -203,6 +251,46 @@ class FlowContainer:
             logging.error(f"Error loading flow: {e}")
             return False
 
+class EarlyStopping:
+    """
+    Early stopping class to stop training the flow model when the validation loss does not improve.
+    
+    Args:
+        patience (int): Number of epochs to wait before stopping training. Default is 10.
+        delta (float): Minimum change in the monitored quantity to qualify as an improvement. Default is 1e-6.
+    
+    Methods:
+        __call__(val_loss):
+            Checks if the validation loss has improved.
+    """
+
+    def __init__(self, patience: int = 10, delta: float = 1e-6):
+        self.patience = patience
+        self.delta = delta
+        self.counter = 0
+        self.best_loss = float('inf')
+        self.early_stop = False
+
+    def __call__(self, val_loss: float):
+        """
+        Checks if the validation loss has improved.
+        
+        Args:
+            val_loss (float): The validation loss to check.
+        
+        Returns:
+            bool: True if the validation loss has not improved for the specified number of epochs, False otherwise.
+        """
+
+        if np.abs(val_loss - self.best_loss) < self.delta:
+            self.counter += 1
+            if self.counter >= self.patience:
+                self.early_stop = True
+        else:
+            self.best_loss = val_loss
+            self.counter = 0
+
+        return self.early_stop
 
 class EvidenceFlow(FlowContainer):
     """
@@ -216,7 +304,7 @@ class EvidenceFlow(FlowContainer):
         posterior_samples (np.ndarray or dict, optional): Posterior samples. Defaults to None.
         logposterior_values (np.ndarray, optional): logPosterior values. Defaults to None.
         dtype (torch.dtype, optional): Data type for tensors. Defaults to torch.float64.
-        Nbatches (int, optional): Number of batches. Defaults to 100.
+        Nbatches (int, optional): Number of batches. Defaults to 1.
         split_ratio (float, optional): Ratio to split data into training and validation sets. Defaults to 0.8.
         conversion_method (str, optional): Method for data conversion to the flow latent space ('normalize' or 'standardize'). Defaults to 'normalize'.
     
@@ -239,23 +327,22 @@ class EvidenceFlow(FlowContainer):
                  device: str | torch.device = 'cpu', 
                  verbose: bool = False,
                  dtype: torch.dtype = torch.float64,
-                 Nbatches: int = 100,
+                 Nbatches: int = 1,
                  split_ratio: float = 0.8,
                  conversion_method: str = 'normalize'
                  ):
         
+        super().__init__(num_flow_steps, use_nvp, device, dtype, verbose)
         
         self.split_ratio = split_ratio
         self._setup_conversions(conversion_method)
         self.posterior_samples = self._process_posterior_samples(posterior_samples)
-        self._process_tensors()
 
-        num_samples, num_dims = self.posterior_samples.shape
-        self.Nbatches = Nbatches if Nbatches else num_samples
+        self.Nsamples, self.num_dims = self.posterior_samples.shape
+        self.Nbatches = Nbatches if Nbatches < self.Nsamples else self.Nsamples
         self.batch_size = self.Nsamples // self.Nbatches
         self.logposterior_values = logposterior_values
-
-        super().__init__(num_dims, num_flow_steps, use_nvp, device, dtype, verbose)
+        self._process_tensors()
 
     def _setup_conversions(self, conversion_method):
         """
@@ -323,7 +410,7 @@ class EvidenceFlow(FlowContainer):
         train_loader, val_loader = create_data_loaders(train_samples, val_samples, batch_size=self.batch_size, num_workers=4)
         self.load_data(train_loader, val_loader)
 
-        self.latent_target = latent_samples.cpu().detach().numpy()
+        self.latent_target = latent_samples.to(self.device)
 
     def get_logZ(self,
                  load_kwargs: dict = {},
@@ -335,16 +422,18 @@ class EvidenceFlow(FlowContainer):
         Args:
             load_kwargs (dict): Keyword arguments for loading the flow model.
             train_kwargs (dict): Keyword arguments for training the flow model.
+        
         Returns:
-            float: The mean log evidence.
-            float: The standard deviation of the log evidence.
+            logZ (float): The mean log evidence.
+            dlogZ (float): The standard deviation of the log evidence.
         """
         self._sanity_check_flow(load_kwargs, train_kwargs)
         
-        logProb = self.flow.log_prob(self.latent_target.to(self.device)).cpu().detach().numpy()
+        logProb = self.flow.log_prob(self.latent_target).cpu().detach().numpy()
         logZ = self.logposterior_values - logProb
         mean, std = np.mean(logZ), np.std(logZ)
         logging.debug(f"LogZ: {mean} +/- {std}")
+        
         return mean, std
     
     def get_draws(self, load_kwargs: dict = {}, train_kwargs: dict = {}, num_draws: int = 10000):
@@ -373,15 +462,22 @@ class EvidenceFlow(FlowContainer):
             train_kwargs (dict): Keyword arguments for training the flow model. Refer to the documentation for the `train` method.
         """
         if not hasattr(self, 'flow'):
-            logging.debug("Building flow")
-            self.build_flow()
+            logging.info("Building flow")
+            self.build_flow(self.num_dims)
         
         load = self.load(**load_kwargs)
+        train_kwargs_here = train_kwargs.copy()
         
         if not load:
-            train_kwargs['target_distribution'] = self.latent_target
-            logging.debug("Training flow")
-            self.train(**train_kwargs)
+            train_kwargs['target_distribution'] = self.latent_target.cpu().detach().numpy()
+            if 'path' not in train_kwargs_here and 'path' in load_kwargs:
+                train_kwargs_here['path'] = load_kwargs['path']
+
+            if 'filename' not in train_kwargs_here and 'filename' in load_kwargs:
+                train_kwargs_here['filename'] = load_kwargs['filename']
+
+            logging.info("Training flow")
+            self.train(**train_kwargs_here)
 
 class ErynEvidenceFlow(EvidenceFlow):
     """
@@ -396,7 +492,7 @@ class ErynEvidenceFlow(EvidenceFlow):
         device (str or torch.device): Device to run the model on. Default is 'cpu'.
         verbose (bool): Whether to print verbose output during training. Default is False.
         dtype (torch.dtype): Data type for tensors. Default is torch.float64.
-        Nbatches (int): Number of batches. Default is 100.
+        Nbatches (int): Number of batches. Default is 1.
         split_ratio (float): Ratio to split data into training and validation sets. Default is 0.8.
         conversion_method (str): Method for data conversion to the flow latent space ('normalize' or 'standardize'). Default is 'normalize'.
     """
@@ -410,7 +506,7 @@ class ErynEvidenceFlow(EvidenceFlow):
                 device: str | torch.device = 'cpu', 
                 verbose: bool = False,
                 dtype: torch.dtype = torch.float64,
-                Nbatches: int = 100,
+                Nbatches: int = 1,
                 split_ratio: float = 0.8,
                 conversion_method: str = 'normalize'):
         

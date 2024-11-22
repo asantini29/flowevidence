@@ -19,7 +19,7 @@ def setup_logging(verbose=False):
         """
         
         logging.basicConfig(
-            level=logging.DEBUG if verbose else logging.INFO,
+            level=logging.INFO if verbose else logging.WARNING,
             format="%(asctime)s - %(levelname)s - %(message)s"
         )
 
@@ -256,27 +256,30 @@ def cornerplot_training(samples: np.ndarray,
         plot_dir (str, optional): The directory where the plot will be saved. Defaults to './'.
         savename (str, optional): The name of the saved plot file. Defaults to 'corner'.
     """
-
+    color_target = 'k'
+    color_samples = "#5790fc"
     if target_distribution is not None:
-        fig = corner(target_distribution, bins=50, color='k')
-        fig = corner(samples, bins=50, color='r', fig=fig)
+        fig = corner(target_distribution, bins=50, color=color_target)
+        fig = corner(samples, bins=50, color=color_samples, fig=fig)
 
         handles = [
-        plt.Line2D([], [], color='k', label='Target Distribution'),
-        plt.Line2D([], [], color='r', label='Flow @ epoch ' + str(epoch))
+        plt.Line2D([], [], color=color_target, label=r'Target \n Distribution'),
+        plt.Line2D([], [], color=color_samples, label=r'Flow @ \n epoch ' + str(epoch))
     ]
     else:
         fig = corner(samples, bins=50, color='r')
         handles = [
         plt.Line2D([], [], color='r', label='Flow @ epoch ' + str(epoch))
     ]
-
-    axes = fig.axes  # Get the axes of the figure
-    axes[-1].legend(handles=handles, loc="upper right")  # Add legend to the last axis
+    
+    ndims = samples.shape[1] # Number of dimensions in the samples
+    axes = np.array(fig.axes).reshape(ndims, ndims)  # Get the axes of the figure
+    axes[0, 1].legend(handles=handles, loc="upper left")  # Add legend to the last axis
+    #plt.tight_layout()
     plt.savefig(plot_dir + savename)
     plt.close(fig)
 
-def lossplot(epochs_losses: np.ndarray | list, 
+def lossplot(epochs: np.ndarray | list, 
              train_losses: np.ndarray |  list,
              val_losses: np.ndarray | list,
              plot_dir: str = './',
@@ -286,19 +289,30 @@ def lossplot(epochs_losses: np.ndarray | list,
     Plots the training and validation losses over epochs and saves the plot as an image file.
     
     Args:
-        epochs_losses (list or array-like): List or array of total losses for each epoch.
+        epochs (list or array-like): List or array of epoch numbers.
         train_losses (list or array-like): List or array of training losses for each epoch.
         val_losses (list or array-like): List or array of validation losses for each epoch.
         plot_dir (str, optional): Directory where the plot image will be saved. Default is './'.
         savename (str, optional): Name of the saved plot image file. Default is 'losses'.
     """
+    #ensure they are arrays
+    epochs = np.array(epochs)
+    train_losses = np.array(train_losses)
+    val_losses = np.array(val_losses)
 
     fig = plt.figure(figsize=(12, 8))
-    plt.plot(epochs_losses, label='total')
-    plt.plot(train_losses, label='train')
-    plt.plot(val_losses, label='val')
+
+    # set an offset to make all the values positive and allow the semilogy plot
+    offset = np.abs(min(np.min(train_losses), np.min(val_losses))) + 1
+
+    train_losses += offset
+    val_losses += offset
+
+    plt.semilogy(epochs, train_losses, '-x', label='Training')
+    plt.semilogy(epochs, val_losses, '-x', label='Validation')
+
     plt.legend()
     plt.xlabel('Epoch')
-    plt.ylabel('Loss')
+    plt.ylabel('Loss (scaled for visualization)')
     plt.savefig(plot_dir + savename)
     plt.close(fig)
