@@ -4,5 +4,6 @@
     options:
             members:
                 - FlowContainer
+                - EarlyStopping
                 - EvidenceFlow
                 - ErynEvidenceFlow
