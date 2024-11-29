@@ -71,7 +71,7 @@ if __name__ == '__main__':
         train_samples, val_samples = shuffled_samples, None
     
     batch_size = val_samples.shape[0] // 20 if train_samples is not None else 128
-    #batch_size = 512
+    batch_size = 512 if batch_size > 512 else batch_size
     train_loader, val_loader = create_data_loaders(train_samples, val_samples, batch_size=batch_size, num_workers=0)
 
     lambda_L1 = 0.0
