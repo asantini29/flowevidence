@@ -402,7 +402,7 @@ class EarlyStopping:
             val_loss (float): The validation loss to check.
         
         Returns:
-            bool: True if the validation loss has not improved for the specified number of epochs, False otherwise.
+            stop (bool): True if the validation loss has not improved for the specified number of epochs, False otherwise.
         """
 
         if np.abs(val_loss - self.best_loss) < self.delta:

@@ -1,4 +1,4 @@
-from flowevidence.encode import SharedModelAE, SharedModelDecoder, SharedModelEncoder, MaskedAutoEncoder
+from flowevidence.encode import MaskedAutoEncoder
 from flowevidence.utils import *
 import torch
 import matplotlib.pyplot as plt
@@ -39,10 +39,10 @@ if __name__ == '__main__':
     samples = samples_all[:, 0].reshape(-1, nl*nd)
 
     max_dim = samples.shape[1]
-    latent_dim = nd # avoid compression loss
+    latent_dim = (nl - 3) * nd # avoid compression loss
     hidden_dim = 256
     dropout = 0.1
-    split_ratio = 0.7
+    split_ratio = 0.8
     dtype = torch.float64
     verbose = True  
 
@@ -55,9 +55,14 @@ if __name__ == '__main__':
                                     verbose=verbose
                                     )
 
-    posterior_samples = torch.tensor(samples, dtype=dtype)
+    # discard the first 1000 samples and use 20 % as test dataset
+    discard = 1000
+    test_ratio = 0.1
+    nsamples = samples.shape[0]
+    posterior_samples = torch.tensor(samples[discard:int( (1-test_ratio) * nsamples)], dtype=dtype)
+    test_samples = torch.tensor(samples[int(test_ratio * nsamples):], dtype=dtype)
     latent_samples, q1, q2 = normalize_minmax(posterior_samples)
-    latent_target = latent_samples
+    latent_target, q1test, q2test = normalize_minmax(test_samples)
 
     shuffled_samples = shuffle(latent_samples)
     if split_ratio:
@@ -66,7 +71,7 @@ if __name__ == '__main__':
         train_samples, val_samples = shuffled_samples, None
     
     batch_size = val_samples.shape[0] // 20 if train_samples is not None else 128
-    batch_size = 512
+    #batch_size = 512
     train_loader, val_loader = create_data_loaders(train_samples, val_samples, batch_size=batch_size, num_workers=0)
 
     lambda_L1 = 0.0
@@ -87,13 +92,13 @@ if __name__ == '__main__':
     print('nans predicted by the autoencoder: %.i' % torch.isnan(decoded).sum().item())
     print('nans present in the target: %.i' % torch.isnan(latent_target).sum().item())
    
-    target_clean = denormalize_minmax(latent_target, q1, q2)
+    target_clean = denormalize_minmax(latent_target, q1test, q2test)
     target_clean = target_clean.cpu().detach().numpy()
     target_clean = target_clean.reshape(-1, nd)
     target_clean = clean_chain(target_clean)
     
     fig = corner.corner(target_clean, color="k", density=True)
-    decoded_clean = denormalize_minmax(decoded, q1, q2)
+    decoded_clean = denormalize_minmax(decoded.cpu().detach(), q1test, q2test)
     decoded_clean = decoded_clean.cpu().detach().numpy()
     decoded_clean = decoded_clean.reshape(-1, nd)
     decoded_clean = clean_chain(decoded_clean)

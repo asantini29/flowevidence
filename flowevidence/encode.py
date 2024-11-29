@@ -240,7 +240,7 @@ class MaskedAutoEncoder:
             reconstructed_mask (torch.Tensor): Reconstructed NaN mask.
 
         Returns:
-            torch.Tensor: Combined reconstruction loss.
+            loss (torch.Tensor): Combined reconstruction loss.
         """
         # Mask for valid entries
         valid_loss = ((input_mask * (input - reconstruction)) ** 2).mean()  # MSE for valid entries
@@ -523,7 +523,7 @@ class MaskedAutoEncoder:
             threshold (float): Threshold to classify mask probabilities as valid or NaN.
 
         Returns:
-            torch.Tensor: Post-processed data with NaNs reintroduced.
+            reconstructed_data (torch.Tensor): Post-processed data with NaNs reintroduced.
         """
         nan_positions = (reconstructed_mask < threshold)
         reconstructed_data[nan_positions] = float('nan')  # Replace positions with NaN
