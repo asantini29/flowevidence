@@ -4,7 +4,7 @@ import os
 import torch
 from torch.utils.data import DataLoader
 
-from typing import Union, Optional, Callable
+from typing import Optional, Callable
 import logging
 import numpy as np
 
@@ -37,7 +37,7 @@ class FlowContainer:
         device (Union[str, torch.device]): Device to run the model on. Default is 'cpu'.
         dtype (torch.dtype): Data type for tensors. Default is torch.float64.
         verbose (bool): Whether to print verbose output during training. Default is False.
-
+        
     Methods:
         build_flow(num_dims=None):
             Builds the flow model using the specified parameters.
@@ -54,7 +54,7 @@ class FlowContainer:
                 use_nvp: bool = False,
                 device: str | torch.device = 'cpu',
                 dtype: torch.dtype = torch.float64,
-                verbose: bool = False
+                verbose: bool = False,
                 ):
         
         self.device = torch.device(device) if isinstance(device, str) else device
@@ -65,7 +65,7 @@ class FlowContainer:
 
         self.num_flow_steps = num_flow_steps
         self.use_nvp = use_nvp
-
+    
         self.train_loader = None
         self.val_loader = None
 
@@ -80,7 +80,11 @@ class FlowContainer:
             num_dims (int, optional): The number of dimensions for the flow model. Defaults to None.
         """
 
-        self.flow = get_flow(num_dims, self.num_flow_steps, use_nvp=self.use_nvp, device=self.device)
+        self.flow = get_flow(num_dims, 
+                             self.num_flow_steps, 
+                             use_nvp=self.use_nvp, 
+                             device=self.device
+                             )
 
     def load_data(self, train_loader: DataLoader, val_loader: Optional[DataLoader] = None):
         """
@@ -122,7 +126,14 @@ class FlowContainer:
         logging.info("Training flow with {} flow steps".format(self.num_flow_steps))
         
         optimizer = torch.optim.Adam(self.flow.parameters(), lr=lr)
-        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=100, gamma=0.5)
+        if self.val_loader:
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 
+                                                                verbose=self.verbose,
+                                                                patience=10,
+                                                                threshold=1e-4)
+                                                                
+        else:
+            scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=100, gamma=0.5)
 
         epochs_losses = []
         train_losses = []
@@ -151,8 +162,9 @@ class FlowContainer:
 
         for epoch in range(start_epoch, epochs):
             train_loss = self._train_one_epoch(optimizer, lambdaL2)
-            scheduler.step()
             val_loss = self._validate_one_epoch(lambdaL2) if self.val_loader else None
+            scheduler.step(val_loss) if self.val_loader else scheduler.step()
+
 
             if stopping_fn:
                 if stopping_fn(val_loss):
@@ -160,7 +172,7 @@ class FlowContainer:
                     converged = True
                     break
 
-            if epoch % 100 == 0:
+            if epoch  > 0 and epoch % 100 == 0:
                 if self.verbose:
                     self._log_epoch(epoch, train_loss, val_loss, epochs_losses, train_losses, val_losses, target_distribution, savepath)
                     logging.info("Saving model @ epoch {}".format(epoch))
@@ -177,7 +189,7 @@ class FlowContainer:
         self.flow.train()
         train_loss = 0
         for batch in self.train_loader:
-            batch = batch[0].to(self.device)
+            batch = batch[0].to(self.device, non_blocking=self.device.type == 'cuda')
             optimizer.zero_grad()
             loss = loss_fn(self.flow, batch)
             l2_reg = l2_regularization(self.flow, lambdaL2) if lambdaL2 else 0
@@ -192,7 +204,7 @@ class FlowContainer:
         val_loss = 0
         with torch.no_grad():
             for batch in self.val_loader:
-                batch = batch[0].to(self.device)
+                batch = batch[0].to(self.device, non_blocking=self.device.type == 'cuda')
                 loss = loss_fn(self.flow, batch)
                 l2_reg = l2_regularization(self.flow, lambdaL2) if lambdaL2 else 0
                 loss = loss + l2_reg
@@ -251,47 +263,6 @@ class FlowContainer:
             logging.error(f"Error loading flow: {e}")
             return False
 
-class EarlyStopping:
-    """
-    Early stopping class to stop training the flow model when the validation loss does not improve.
-    
-    Args:
-        patience (int): Number of epochs to wait before stopping training. Default is 10.
-        delta (float): Minimum change in the monitored quantity to qualify as an improvement. Default is 1e-6.
-    
-    Methods:
-        __call__(val_loss):
-            Checks if the validation loss has improved.
-    """
-
-    def __init__(self, patience: int = 10, delta: float = 1e-6):
-        self.patience = patience
-        self.delta = delta
-        self.counter = 0
-        self.best_loss = float('inf')
-        self.early_stop = False
-
-    def __call__(self, val_loss: float):
-        """
-        Checks if the validation loss has improved.
-        
-        Args:
-            val_loss (float): The validation loss to check.
-        
-        Returns:
-            bool: True if the validation loss has not improved for the specified number of epochs, False otherwise.
-        """
-
-        if np.abs(val_loss - self.best_loss) < self.delta:
-            self.counter += 1
-            if self.counter >= self.patience:
-                self.early_stop = True
-        else:
-            self.best_loss = val_loss
-            self.counter = 0
-
-        return self.early_stop
-
 class EvidenceFlow(FlowContainer):
     """
     A class for computing the log evidence (logZ) using a trained flow model and the posterior values associated with MCMC samples.
@@ -329,7 +300,9 @@ class EvidenceFlow(FlowContainer):
                  dtype: torch.dtype = torch.float64,
                  Nbatches: int = 1,
                  split_ratio: float = 0.8,
-                 conversion_method: str = 'normalize'
+                 conversion_method: str = 'normalize', #todo change names
+                 autoencoder: nn.Module = None,
+                 train_autoencoder_kwargs: dict = {},
                  ):
         
         super().__init__(num_flow_steps, use_nvp, device, dtype, verbose)
@@ -338,11 +311,17 @@ class EvidenceFlow(FlowContainer):
         self._setup_conversions(conversion_method)
         self.posterior_samples = self._process_posterior_samples(posterior_samples)
 
-        self.Nsamples, self.num_dims = self.posterior_samples.shape
+        self.Nsamples, self.num_dims_full = self.posterior_samples.shape
         self.Nbatches = Nbatches if Nbatches < self.Nsamples else self.Nsamples
         self.batch_size = self.Nsamples // self.Nbatches
         self.logposterior_values = logposterior_values
+
+        # Autoencoder
+        self.autoencoder = autoencoder
+        self.train_autoencoder_kwargs = train_autoencoder_kwargs
+
         self._process_tensors()
+        self.num_dims = self.latent_target.shape[1]
 
     def _setup_conversions(self, conversion_method):
         """
@@ -355,12 +334,12 @@ class EvidenceFlow(FlowContainer):
             ValueError: If an invalid conversion method is provided.
         """
 
-        if conversion_method == 'normalize':
-            self._to_latent_space = normalize
-            self._from_latent_space = denormalize
-        elif conversion_method == 'standardize':    
-            self._to_latent_space = standardize
-            self._from_latent_space = destandardize
+        if conversion_method == 'minmax':
+            self._to_latent_space = normalize_minmax
+            self._from_latent_space = denormalize_minmax
+        elif conversion_method == 'gaussian':    
+            self._to_latent_space = normalize_gaussian
+            self._from_latent_space = normalize_gaussian
         else:
             raise ValueError(f"Invalid conversion method: {conversion_method}. Choose from 'normalize' or 'standardize'.")
     
@@ -392,7 +371,7 @@ class EvidenceFlow(FlowContainer):
         3. Splits the shuffled samples into training and validation sets based on the split ratio.
         4. Creates data loaders for the training and validation sets.
         5. Loads the data using the created data loaders.
-        6. Stores the latent target as a NumPy array.
+        6. If an autoencoder is provided, it is used to encode the training and validation samples.        
 
         Attributes:
             self.q1: The first component of the latent space representation.
@@ -401,16 +380,60 @@ class EvidenceFlow(FlowContainer):
         """
         
         latent_samples, self.q1, self.q2 = self._to_latent_space(self.posterior_samples)
+        self.latent_target = latent_samples.to(self.device)
+
         shuffled_samples = shuffle(latent_samples)
         if self.split_ratio:
             train_samples, val_samples = split(shuffled_samples, self.split_ratio)
         else:
             train_samples, val_samples = shuffled_samples, None
 
-        train_loader, val_loader = create_data_loaders(train_samples, val_samples, batch_size=self.batch_size, num_workers=4)
+        train_loader, val_loader = create_data_loaders(train_samples, val_samples, batch_size=self.batch_size, num_workers=0, pin_memory=self.device.type == 'cuda')
+
+        train_loader, val_loader = self._encode_tensors(train_loader, val_loader, self.train_autoencoder_kwargs)
+
         self.load_data(train_loader, val_loader)
 
-        self.latent_target = latent_samples.to(self.device)
+    def _sanity_check_autoencoder(self, 
+                                  train_loader, 
+                                  val_loader,
+                                  training_kwargs
+                                  ):
+        """
+        Checks if the autoencoder is trained and trains it if necessary.
+
+        Args:
+            train_loader (DataLoader): The training samples to train the autoencoder on.
+            val_loader (DataLoader): The validation samples to train the autoencoder on.
+            training_kwargs (dict): Keyword arguments for training the autoencoder.
+        """
+
+        if self.autoencoder.trained:
+            # check if autoencoder is trained. If not, train it
+            logging.info("Autoencoder already trained")
+        else:
+            logging.info("Training autoencoder")
+            self.autoencoder.train(train_loader, val_loader, **training_kwargs)
+            logging.info("Autoencoder trained")
+
+
+    def _encode_tensors(self, train_loader, val_loader, training_kwargs):
+        """
+        Encodes the training and validation samples using the autoencoder. If the autoencoder is not trained, it will be trained. If the autoencoder is not provided, the samples are returned as is.
+        
+        Args:
+            train_loader (torch.Tensor): The training samples to train the autoencoder on.
+            val_loader (torch.Tensor): The validation samples to train the autoencoder on.
+            training_kwargs (dict): Keyword arguments for training the autoencoder.
+        """
+        if self.autoencoder:
+            self._sanity_check_autoencoder(train_loader, val_loader, training_kwargs)
+            train_loader = self.autoencoder.encode(train_loader)
+            val_loader = self.autoencoder.encode(val_loader)
+            self.latent_target = self.autoencoder.encode(self.latent_target)
+        
+        return train_loader, val_loader
+            
 
     def get_logZ(self,
                  load_kwargs: dict = {},
@@ -451,7 +474,12 @@ class EvidenceFlow(FlowContainer):
         self._sanity_check_flow(load_kwargs, train_kwargs)
         samples = self.flow.sample(num_draws).cpu().detach().numpy()
 
-        return self._from_latent_space(samples, self.q1, self.q2)
+        if self.autoencoder:
+            samples = self.autoencoder.decode(samples)
+
+        converted = self._from_latent_space(samples, self.q1, self.q2)
+
+        return converted
     
     def _sanity_check_flow(self, load_kwargs: dict = {}, train_kwargs: dict = {}):
         """
@@ -469,7 +497,7 @@ class EvidenceFlow(FlowContainer):
         train_kwargs_here = train_kwargs.copy()
         
         if not load:
-            train_kwargs['target_distribution'] = self.latent_target.cpu().detach().numpy()
+            train_kwargs_here['target_distribution'] = self.latent_target.cpu().detach().numpy()
             if 'path' not in train_kwargs_here and 'path' in load_kwargs:
                 train_kwargs_here['path'] = load_kwargs['path']
 
@@ -487,6 +515,7 @@ class ErynEvidenceFlow(EvidenceFlow):
         backend (str or HDFBackend): The backend to load the samples from.
         loader (SamplesLoader): A pysco.eryn.SamplesLoader object to load the samples from.
         ess (int): The effective sample size. Default is 1e4.
+        leave_to_ndim (bool): Whether to reshape the leaves to ndim. Default is False.
         num_flow_steps (int): Number of flow steps in the model. Default is 5.
         use_nvp (bool): Whether to use NVP architecture. Default is False.
         device (str or torch.device): Device to run the model on. Default is 'cpu'.
@@ -494,13 +523,14 @@ class ErynEvidenceFlow(EvidenceFlow):
         dtype (torch.dtype): Data type for tensors. Default is torch.float64.
         Nbatches (int): Number of batches. Default is 1.
         split_ratio (float): Ratio to split data into training and validation sets. Default is 0.8.
-        conversion_method (str): Method for data conversion to the flow latent space ('normalize' or 'standardize'). Default is 'normalize'.
+        conversion_method (str): Method for data conversion to the flow latent space ('normalize_minmax' or 'normalize_gaussian'). Default is 'normalize'.
     """
 
     def __init__(self,
                 backend: str | HDFBackend = None,
                 loader: SamplesLoader = None,
                 ess: int = int(1e4),
+                leave_to_ndim: bool = False,
                 num_flow_steps: int = 5, 
                 use_nvp: bool = False, 
                 device: str | torch.device = 'cpu', 
@@ -508,7 +538,7 @@ class ErynEvidenceFlow(EvidenceFlow):
                 dtype: torch.dtype = torch.float64,
                 Nbatches: int = 1,
                 split_ratio: float = 0.8,
-                conversion_method: str = 'normalize'):
+                conversion_method: str = 'normalize_minmax'):
         
         
         
@@ -522,12 +552,12 @@ class ErynEvidenceFlow(EvidenceFlow):
         elif loader is None and backend is not None:
             if pysco_here:
                 loader = SamplesLoader(backend)
-                samples, logL, logP = loader.load(ess=ess, squeeze=True)
+                samples, logL, logP = loader.load(ess=ess, squeeze=True, leaves_to_ndim=leave_to_ndim)
             else:
                 if isinstance(backend, str):
                     backend = HDFBackend(backend)
 
-                samples, logP = self._load_samples_posterior(backend, ess)
+                samples, logP = self._load_samples_posterior(backend, ess, leaves_to_ndim=leave_to_ndim)
         
         else:
             samples, logL, logP = loader.load(ess=ess, squeeze=True)
@@ -579,7 +609,7 @@ class ErynEvidenceFlow(EvidenceFlow):
 
         return discard, thin
     
-    def _load_samples_posterior(self, backend, ess=None):
+    def _load_samples_posterior(self, backend, ess=None, leaves_to_ndim=False):
         """
         Load the samples from the backend. If the effective sample size is provided, the number of samples to discard and thin is computed.
         This is NOT compatible with reversible jump MCMC yet.
@@ -602,7 +632,10 @@ class ErynEvidenceFlow(EvidenceFlow):
         
         for name in samples.keys():
             ns, nt, nw, nl, nd = samples[name].shape
-            samples_out[name] = np.squeeze(samples[name][discard::thin, 0]).reshape(-1, nd) #take the first temperature chain and flatten the rest
+            if leaves_to_ndim:
+                samples_out[name] = np.squeeze(samples[name][discard::thin, 0]).reshape(-1, nl*nd) #take the first temperature chain and flatten the rest
+            else:
+                samples_out[name] = np.squeeze(samples[name][discard::thin, 0]).reshape(-1, nd) #take the first temperature chain and flatten the rest
         
         logP = backend.get_log_posterior(discard=discard, thin=thin)[:, 0].flatten()
 

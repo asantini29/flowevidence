@@ -1,3 +1,6 @@
+# coding: utf-8
+
+import os
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
@@ -15,7 +18,7 @@ def setup_logging(verbose=False):
         Configures the logging settings for the application.
         
         Args:
-            verbose (bool): If True, sets the logging level to DEBUG. Otherwise, sets it to INFO.
+            verbose (bool): If True, sets the logging level to INFO. Otherwise, sets it to WARNING.
         """
         
         logging.basicConfig(
@@ -23,10 +26,29 @@ def setup_logging(verbose=False):
             format="%(asctime)s - %(levelname)s - %(message)s"
         )
 
-# Define preprocessing functions
-def standardize(samples: torch.tensor) -> tuple[torch.tensor: torch.tensor, torch.tensor]:
+def batch_iterator(data: DataLoader) -> list:
     """
-    Standardizes the given samples by removing the mean and scaling to unit variance.
+    Iterates over the given data loader to yield batches of samples.
+    
+    Args:
+        data (DataLoader): The data loader to iterate over.
+    
+    Yields:
+        torch.Tensor: A batch of samples.
+    """
+    num_batches = len(data)
+    batch_size = data.batch_size
+    batches = []
+
+    for i in range(num_batches):
+        batches.append(data[i * batch_size:(i + 1) * batch_size])
+
+    return batches
+
+# Define preprocessing functions
+def normalize_gaussian(samples: torch.tensor) -> tuple[torch.tensor: torch.tensor, torch.tensor]:
+    """
+    Standardizes the given samples by removing the mean and scaling to unit variance. Add masking operations to deal with NaN values, for example introduced by RJMCMC.
     
     Args:
         samples (torch.Tensor): A tensor containing the samples to be standardized.
@@ -36,13 +58,34 @@ def standardize(samples: torch.tensor) -> tuple[torch.tensor: torch.tensor, torc
         mean (torch.Tensor): The mean of the original samples.
         std (torch.Tensor): The standard deviation of the original samples.
     """
+    finite_mask = torch.isfinite(samples)  # Boolean mask for finite values
 
-    mean = samples.mean(dim=0)
-    std = samples.std(dim=0)
+    # Replace non-finite values with 0 (or any placeholder value that won't affect sums)
+    finite_samples = samples.clone()
+    finite_samples[~finite_mask] = 0.0
+
+    # Count of finite values per column
+    count_finite = finite_mask.sum(dim=0)
+
+    # Compute sum of finite values per column
+    sum_finite = finite_samples.sum(dim=0)
+
+    # Column-wise mean: Avoid division by zero
+    mean = sum_finite / count_finite
+    mean[count_finite == 0] = float('nan')  # Set mean to NaN where no finite values exist
+
+    # Compute variance and standard deviation
+    squared_diff = (samples - mean.unsqueeze(0)) ** 2
+    squared_diff[~finite_mask] = 0.0  # Ignore non-finite values
+    variance = squared_diff.sum(dim=0) / count_finite
+    variance[count_finite == 0] = float('nan')  # Set variance to NaN where no finite values exist
+    std = variance.sqrt()  # Standard deviation
+
     normalized_samples = (samples - mean) / std
+
     return normalized_samples, mean, std
 
-def normalize(samples: torch.tensor) -> tuple[torch.tensor: torch.tensor, torch.tensor]:
+def normalize_minmax(samples: torch.tensor) -> tuple[torch.tensor: torch.tensor, torch.tensor]:
     """
     Normalizes the given samples by scaling to the range [0, 1].
 
@@ -54,19 +97,32 @@ def normalize(samples: torch.tensor) -> tuple[torch.tensor: torch.tensor, torch.
         minimum (torch.Tensor): The minimum value of the original samples.
         range (torch.Tensor): The range of the original samples.
     """
+    finite_mask = torch.isfinite(samples)  # Boolean mask for finite values
 
-    range = samples.max(dim=0).values - samples.min(dim=0).values
-    minimum = samples.min(dim=0).values
+    # Replace non-finite values with 0 to avoid affecting min and max calculations
+    finite_samples = samples.clone()
+    finite_samples[~finite_mask] = 0.0
 
-    normalized_samples = (samples - minimum) / range
-    return normalized_samples, minimum, range
+    # Compute per-column min and max while ignoring non-finite values
+    min_values = torch.where(finite_mask, samples, float('inf')).min(dim=0).values
+    max_values = torch.where(finite_mask, samples, float('-inf')).max(dim=0).values
 
-def destandardize(samples: torch.tensor, 
+    # Compute range, ensuring no division by zero
+    range_values = max_values - min_values
+    range_values[range_values == 0] = float('nan')  # Handle zero range gracefully
+
+    # Normalize samples
+    normalized_samples = (samples - min_values) / range_values
+
+    # Return normalized samples, along with the min and range used for normalization
+    return normalized_samples, min_values, range_values
+
+def denormalize_gaussian(samples: torch.tensor, 
                 mean: torch.tensor,
                 std: torch.tensor
                 ) -> torch.tensor:
     """
-    Destandardizes the given samples by adding the mean and scaling by the standard deviation.
+    Denormalizes the given samples by adding the mean and scaling by the standard deviation.
 
     Args:
         samples (torch.Tensor): A tensor containing the samples to be destandardized.
@@ -79,7 +135,7 @@ def destandardize(samples: torch.tensor,
 
     return samples * std + mean
 
-def denormalize(samples: torch.tensor, 
+def denormalize_minmax(samples: torch.tensor, 
                 minimum: torch.tensor,
                 range: torch.tensor
                 ) -> torch.tensor:
@@ -133,7 +189,8 @@ def split(samples: torch.tensor,
 def create_data_loaders(train_samples: torch.tensor, 
                         val_samples: torch.tensor,
                         batch_size: int = 256, 
-                        num_workers: int = 4
+                        num_workers: int = 0,
+                        pin_memory: bool = True
                         ) -> tuple[DataLoader, DataLoader]:
     """
     Creates data loaders for training and validation datasets.
@@ -142,7 +199,8 @@ def create_data_loaders(train_samples: torch.tensor,
         train_samples (Tensor): The training samples.
         val_samples (Tensor): The validation samples.
         batch_size (int, optional): Number of samples per batch to load. Default is 256.
-        num_workers (int, optional): How many subprocesses to use for data loading. Default is 4.
+        num_workers (int, optional): How many subprocesses to use for data loading. Default is 0.
+        pin_memory (bool, optional): If True, the data loader will copy Tensors into CUDA pinned memory. Default is True.
     
     Returns:
         train_loader (DataLoader): The training data loader.
@@ -152,8 +210,8 @@ def create_data_loaders(train_samples: torch.tensor,
     train_dataset = TensorDataset(train_samples)
     val_dataset = TensorDataset(val_samples)
     
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=pin_memory)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=pin_memory)
     
     return train_loader, val_loader
 
@@ -263,13 +321,13 @@ def cornerplot_training(samples: np.ndarray,
         fig = corner(samples, bins=50, color=color_samples, fig=fig)
 
         handles = [
-        plt.Line2D([], [], color=color_target, label=r'Target \n Distribution'),
-        plt.Line2D([], [], color=color_samples, label=r'Flow @ \n epoch ' + str(epoch))
+        plt.Line2D([], [], color=color_target, label='Target \n Distribution'),
+        plt.Line2D([], [], color=color_samples, label='Flow @ \n epoch ' + str(epoch))
     ]
     else:
-        fig = corner(samples, bins=50, color='r')
+        fig = corner(samples, bins=50, color=color_samples)
         handles = [
-        plt.Line2D([], [], color='r', label='Flow @ epoch ' + str(epoch))
+        plt.Line2D([], [], color=color_samples, label='Flow @ \n epoch ' + str(epoch))
     ]
     
     ndims = samples.shape[1] # Number of dimensions in the samples
@@ -280,7 +338,7 @@ def cornerplot_training(samples: np.ndarray,
     plt.close(fig)
 
 def lossplot(epochs: np.ndarray | list, 
-             train_losses: np.ndarray |  list,
+             train_losses: np.ndarray | list,
              val_losses: np.ndarray | list,
              plot_dir: str = './',
              savename: str = 'losses'
@@ -303,16 +361,56 @@ def lossplot(epochs: np.ndarray | list,
     fig = plt.figure(figsize=(12, 8))
 
     # set an offset to make all the values positive and allow the semilogy plot
-    offset = np.abs(min(np.min(train_losses), np.min(val_losses))) + 1
+    # offset = np.abs(min(np.min(train_losses), np.min(val_losses))) + 1
+    # train_losses += offset
+    # val_losses += offset
 
-    train_losses += offset
-    val_losses += offset
-
-    plt.semilogy(epochs, train_losses, '-x', label='Training')
-    plt.semilogy(epochs, val_losses, '-x', label='Validation')
+    plt.plot(epochs, train_losses, '-x', label='Training')
+    plt.plot(epochs, val_losses, '-x', label='Validation')
 
     plt.legend()
     plt.xlabel('Epoch')
-    plt.ylabel('Loss (scaled for visualization)')
+    plt.ylabel('Loss')
     plt.savefig(plot_dir + savename)
     plt.close(fig)
+
+class EarlyStopping:
+    """
+    Early stopping class to stop training the flow model when the validation loss does not improve.
+    
+    Args:
+        patience (int): Number of epochs to wait before stopping training. Default is 50.
+        delta (float): Minimum change in the monitored quantity to qualify as an improvement. Default is 1e-6.
+    
+    Methods:
+        __call__(val_loss):
+            Checks if the validation loss has improved.
+    """
+
+    def __init__(self, patience: int = 50, delta: float = 1e-6):
+        self.patience = patience
+        self.delta = delta
+        self.counter = 0
+        self.best_loss = float('inf')
+        self.early_stop = False
+
+    def __call__(self, val_loss: float):
+        """
+        Checks if the validation loss has improved.
+        
+        Args:
+            val_loss (float): The validation loss to check.
+        
+        Returns:
+            bool: True if the validation loss has not improved for the specified number of epochs, False otherwise.
+        """
+
+        if np.abs(val_loss - self.best_loss) < self.delta:
+            self.counter += 1
+            if self.counter >= self.patience:
+                self.early_stop = True
+        else:
+            self.best_loss = val_loss
+            self.counter = 0
+
+        return self.early_stop

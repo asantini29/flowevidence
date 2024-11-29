@@ -9,6 +9,8 @@ nav:
   - API Documentation:
       - Core:
         - api/core.md
+      - Encode:
+        - api/encode.md
       - Utils: 
         - api/utils.md
 
