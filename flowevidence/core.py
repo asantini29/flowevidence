@@ -7,8 +7,9 @@ from torch.utils.data import DataLoader
 from typing import Optional, Callable
 import logging
 import numpy as np
-
+import h5py
 from .utils import *
+from tqdm import tqdm
 
 try:
     from eryn.backends import HDFBackend
@@ -50,8 +51,6 @@ class FlowContainer:
     """
     
     def __init__(self, 
-                num_flow_steps: int = 5, 
-                use_nvp: bool = False,
                 device: str | torch.device = 'cpu',
                 dtype: torch.dtype = torch.float64,
                 verbose: bool = False,
@@ -62,14 +61,16 @@ class FlowContainer:
         torch.set_default_dtype(self.dtype)
         setup_logging(verbose)
         self.verbose = verbose
-
-        self.num_flow_steps = num_flow_steps
-        self.use_nvp = use_nvp
     
         self.train_loader = None
         self.val_loader = None
 
-    def build_flow(self, num_dims: Optional[int] = None):
+    def build_flow(self, 
+                   num_dims: int,
+                   num_flow_steps: int = 5,
+                   transform_type: str = 'maf',
+                   transform_kwargs: dict = {},
+                   ):
         """
         Builds the flow model using the specified parameters.
         This method initializes the flow model by calling the `get_flow` function with the 
@@ -77,14 +78,15 @@ class FlowContainer:
         transformations, and the device to be used for computation.
 
         Args:  
-            num_dims (int, optional): The number of dimensions for the flow model. Defaults to None.
+            num_dims (int): The number of dimensions for the flow model.
         """
 
         self.flow = get_flow(num_dims, 
-                             self.num_flow_steps, 
-                             use_nvp=self.use_nvp, 
-                             device=self.device
-                             )
+                            num_flow_steps=num_flow_steps, 
+                            transform_type=transform_type,
+                            transform_kwargs=transform_kwargs,
+                            device=self.device
+                            )
 
     def load_data(self, train_loader: DataLoader, val_loader: Optional[DataLoader] = None):
         """
@@ -123,12 +125,11 @@ class FlowContainer:
             target_distribution (Optional[np.ndarray], optional): The target distribution for diagnostics. Defaults to None.
         """
 
-        logging.info("Training flow with {} flow steps".format(self.num_flow_steps))
+        logging.info("Training flow for {} epochs".format(epochs - start_epoch))
         
         optimizer = torch.optim.Adam(self.flow.parameters(), lr=lr)
         if self.val_loader:
             scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 
-                                                                verbose=self.verbose,
                                                                 patience=10,
                                                                 threshold=1e-4)
                                                                 
@@ -160,7 +161,9 @@ class FlowContainer:
             logging.info("Resuming training")
             epochs = start_epoch + epochs
 
-        for epoch in range(start_epoch, epochs):
+        epoch_iterator = tqdm(range(start_epoch, epochs), desc="Training", disable=not self.verbose)
+
+        for epoch in epoch_iterator:
             train_loss = self._train_one_epoch(optimizer, lambdaL2)
             val_loss = self._validate_one_epoch(lambdaL2) if self.val_loader else None
             scheduler.step(val_loss) if self.val_loader else scheduler.step()
@@ -191,6 +194,7 @@ class FlowContainer:
         for batch in self.train_loader:
             batch = batch[0].to(self.device, non_blocking=self.device.type == 'cuda')
             optimizer.zero_grad()
+            #breakpoint()
             loss = loss_fn(self.flow, batch)
             l2_reg = l2_regularization(self.flow, lambdaL2) if lambdaL2 else 0
             loss = loss + l2_reg
@@ -222,8 +226,8 @@ class FlowContainer:
         val_losses.append(val_loss)
 
         samples_here = self.flow.sample(10000).cpu().detach().numpy()
-        cornerplot_training(samples_here, target_distribution, epoch=epoch, plot_dir=savepath, savename=f'cornerplot_epoch_{epoch}')
-        lossplot(epochs_losses, train_losses, val_losses, plot_dir=savepath, savename='losses')
+        cornerplot_training(samples_here, target_distribution, epoch=epoch, plot_dir=savepath, savename=f'flow_cornerplot')
+        lossplot(epochs_losses, train_losses, val_losses, plot_dir=savepath, savename='flow_loss')
 
     def _save_model(self, epochs, optimizer, scheduler, trainedpath):
         savedict = {
@@ -509,11 +513,13 @@ class EvidenceFlow(FlowContainer):
 
 class ErynEvidenceFlow(EvidenceFlow):
     """
-    Wrapper class for using the ``EvidenceFlow`` class directly with a backend from the ``Eryn`` mcmc sampler.
+    Wrapper class for using the ``EvidenceFlow`` class directly with a backend from the ``Eryn`` mcmc sampler. 
+    It stores the samples and logP values in a file for faster loading.
     
     Args:
         backend (str or HDFBackend): The backend to load the samples from.
         loader (SamplesLoader): A pysco.eryn.SamplesLoader object to load the samples from.
+        samples_file (str): The file to save the samples and logP values to. Default is './samples.h5'.
         ess (int): The effective sample size. Default is 1e4.
         leave_to_ndim (bool): Whether to reshape the leaves to ndim. Default is False.
         num_flow_steps (int): Number of flow steps in the model. Default is 5.
@@ -529,6 +535,7 @@ class ErynEvidenceFlow(EvidenceFlow):
     def __init__(self,
                 backend: str | HDFBackend = None,
                 loader: SamplesLoader = None,
+                samples_file: h5py.File = './samples.h5',
                 ess: int = int(1e4),
                 leave_to_ndim: bool = False,
                 num_flow_steps: int = 5, 
@@ -546,21 +553,31 @@ class ErynEvidenceFlow(EvidenceFlow):
             raise ImportError("Eryn is not installed. Please install Eryn to use this class, or \
                               use the EvidenceFlow class instead.")
         
-        if backend is None and loader is None:
-            raise ValueError("Either a backend or a loader must be provided.")
-    
-        elif loader is None and backend is not None:
-            if pysco_here:
-                loader = SamplesLoader(backend)
-                samples, logL, logP = loader.load(ess=ess, squeeze=True, leaves_to_ndim=leave_to_ndim)
-            else:
-                if isinstance(backend, str):
-                    backend = HDFBackend(backend)
-
-                samples, logP = self._load_samples_posterior(backend, ess, leaves_to_ndim=leave_to_ndim)
-        
+        if os.path.exists(samples_file):
+            with h5py.File(samples_file, 'r') as f:
+                samples = f['samples'][:]
+                logP = f['logP'][:]
         else:
-            samples, logL, logP = loader.load(ess=ess, squeeze=True)
+            if backend is None and loader is None:
+                raise ValueError("Either a backend or a loader must be provided.")
+        
+            elif loader is None and backend is not None:
+                if pysco_here:
+                    loader = SamplesLoader(backend)
+                    samples, logL, logP = loader.load(ess=ess, squeeze=True, leaves_to_ndim=leave_to_ndim)
+                else:
+                    if isinstance(backend, str):
+                        backend = HDFBackend(backend)
+
+                    samples, logP = self._load_samples_posterior(backend, ess, leaves_to_ndim=leave_to_ndim)
+            
+            else:
+                samples, logL, logP = loader.load(ess=ess, squeeze=True)
+
+           # Save the samples and logP to a file
+            with h5py.File(samples_file, 'w') as f:
+                f.create_dataset('samples', data=samples)
+                f.create_dataset('logP', data=logP) 
 
         super().__init__(posterior_samples=samples, 
                          logposterior_values=logP, 

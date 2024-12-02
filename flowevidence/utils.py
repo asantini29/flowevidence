@@ -4,14 +4,17 @@ import os
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
+
 from nflows.flows import Flow
 from nflows.distributions import StandardNormal
-from nflows.transforms import MaskedAffineAutoregressiveTransform, CompositeTransform, AffineCouplingTransform, RandomPermutation
+from nflows.transforms import CompositeTransform, RandomPermutation, ReversePermutation
 from nflows.nn.nets import ResidualNet
+
 import numpy as np
 import matplotlib.pyplot as plt
 from corner import corner
 import logging
+from .trasforms import get_transform
 
 def setup_logging(verbose=False):
         """
@@ -26,24 +29,6 @@ def setup_logging(verbose=False):
             format="%(asctime)s - %(levelname)s - %(message)s"
         )
 
-def batch_iterator(data: DataLoader) -> list:
-    """
-    Iterates over the given data loader to yield batches of samples.
-    
-    Args:
-        data (DataLoader): The data loader to iterate over.
-    
-    Yields:
-        torch.Tensor: A batch of samples.
-    """
-    num_batches = len(data)
-    batch_size = data.batch_size
-    batches = []
-
-    for i in range(num_batches):
-        batches.append(data[i * batch_size:(i + 1) * batch_size])
-
-    return batches
 
 # Define preprocessing functions
 def normalize_gaussian(samples: torch.tensor) -> tuple[torch.tensor: torch.tensor, torch.tensor]:
@@ -218,7 +203,8 @@ def create_data_loaders(train_samples: torch.tensor,
 # define the flow model
 def get_flow(num_dims: int, 
              num_flow_steps: int, 
-             use_nvp: bool = False, 
+             transform_type: str = 'maf', 
+             transform_kwargs: dict = {},
              device: str | torch.device = 'cpu'
              ) -> Flow:
     # Define the base distribution
@@ -226,34 +212,28 @@ def get_flow(num_dims: int,
 
     # Define the transforms
     transforms = []
+    transform_class, default_kwargs = get_transform(transform_type)
+    transform_kwargs = {**default_kwargs, **transform_kwargs}
+
+    if transform_type == 'nvp':
+        logging.warning("NVP is still under development and may not work as expected.") 
+    else:
+        transform_kwargs['features'] = num_dims
+
+    mask = torch.arange(num_dims) % 2
+
+    if 'mask' in transform_kwargs and transform_kwargs['mask'] is None:
+        transform_kwargs['mask'] = mask 
+    
     for _ in range(num_flow_steps):
         #transforms.append(ReversePermutation(features=num_dims))
         transforms.append(RandomPermutation(features=num_dims))
+        transforms.append(transform_class(**transform_kwargs))
 
-        if use_nvp:
-            logging.warning("NVP seemed not to converge as well as MAF, use it mostly for testing at the moment")
-            transforms.append(AffineCouplingTransform(
-                mask=torch.arange(0, num_dims) % 2,
-                transform_net_create_fn=lambda in_features, out_features: ResidualNet(
-                    in_features,
-                    out_features,
-                    hidden_features=128,
-                    num_blocks=2,
-                    activation=nn.ReLU()
-                )
-            ))     
-            
-        else:
-            transforms.append(
-                MaskedAffineAutoregressiveTransform(
-                    features=num_dims, 
-                    hidden_features=128, 
-                    dropout_probability=0.3,
-                    use_batch_norm=False,
-                    )
-                )
+        if transform_type == 'rqs':
+            transforms.append(ReversePermutation(features=num_dims))
+            mask = 1 - mask
    
-
     # Combine the transforms into a composite transform
     transform = CompositeTransform(transforms)
 
@@ -322,7 +302,7 @@ def cornerplot_training(samples: np.ndarray,
 
         handles = [
         plt.Line2D([], [], color=color_target, label='Target \n Distribution'),
-        plt.Line2D([], [], color=color_samples, label='Flow @ \n epoch ' + str(epoch))
+        plt.Line2D([], [], color=color_samples, label='Training @ \n epoch ' + str(epoch))
     ]
     else:
         fig = corner(samples, bins=50, color=color_samples)
@@ -371,8 +351,20 @@ def lossplot(epochs: np.ndarray | list,
     plt.legend()
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
+    plt.tight_layout()
     plt.savefig(plot_dir + savename)
     plt.close(fig)
+
+def clean_chain(chain):
+        ndim = chain.shape[1]
+        naninds = np.logical_not(np.isnan(chain[:, 0].flatten()))
+        samples_out = np.zeros((chain[:,0].flatten()[naninds].shape[0], ndim))  # init the chains to plot\n",
+        for d in range(ndim):
+            givenparam = chain[:, d].flatten()
+            samples_out[:, d] = givenparam[
+                np.logical_not(np.isnan(givenparam))
+            ]
+        return samples_out
 
 class EarlyStopping:
     """
@@ -414,3 +406,5 @@ class EarlyStopping:
             self.counter = 0
 
         return self.early_stop
+
+    
