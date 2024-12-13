@@ -45,6 +45,7 @@ class MaskedEncoder(nn.Module):
 
         self.fc4 = nn.Linear(4*hidden_dim, 2*hidden_dim, device=device, dtype=dtype)
         self.bn4 = nn.BatchNorm1d(2*hidden_dim, device=device, dtype=dtype)
+        
         if use_vae:
             self.fc5_mu = nn.Linear(2*hidden_dim, latent_dim, device=device, dtype=dtype)
             self.fc5_logvar = nn.Linear(2*hidden_dim, latent_dim, device=device, dtype=dtype)
@@ -56,7 +57,10 @@ class MaskedEncoder(nn.Module):
 
         self.forward = self.forward_vae if use_vae else self.forward_det
 
-    def forward_det(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    def forward_det(self, 
+                    x: torch.Tensor, 
+                    mask: torch.Tensor
+                    ) -> torch.Tensor:
         """
         Encodes input data into a latent space, considering the mask for valid data.
 
@@ -91,7 +95,10 @@ class MaskedEncoder(nn.Module):
         z = self.fc5(z)
         return z
     
-    def forward_vae(self, x: torch.Tensor, mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward_vae(self, 
+                    x: torch.Tensor, 
+                    mask: torch.Tensor
+                    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Encodes input data into a latent space, considering the mask for valid data. 
 
@@ -102,6 +109,7 @@ class MaskedEncoder(nn.Module):
         Returns:
             tuple[torch.Tensor, torch.Tensor]: Encoded data mean and log-variance of the latent space.
         """
+
         combined = torch.cat((x.nan_to_num(0.0), mask), dim=1)
         z = self.fc1(combined)
         z = self.bn1(z)
@@ -285,7 +293,14 @@ class MaskedAutoEncoder:
         else:
             self._get_latent = self.get_z_det
 
-    def VAE_loss_fn(self, input, reconstruction, input_mask, reconstructed_mask, mean, logvar):
+    def VAE_loss_fn(self, 
+                    input: torch.Tensor, 
+                    reconstruction: torch.Tensor,
+                    input_mask: torch.Tensor, 
+                    reconstructed_mask: torch.Tensor, 
+                    mean: torch.Tensor, 
+                    logvar: torch.Tensor
+                    ) -> torch.Tensor:
 
         # KL Divergence loss
         loss = self.reconstruction_loss_fn(input, reconstruction, input_mask, reconstructed_mask)
@@ -293,7 +308,12 @@ class MaskedAutoEncoder:
 
         return loss + kl_loss
 
-    def reconstruction_loss_fn(self, input, reconstruction, input_mask, reconstructed_mask, mean=None, logvar=None):
+    def reconstruction_loss_fn(self,
+                               input: torch.Tensor, 
+                               reconstruction: torch.Tensor, 
+                               input_mask: torch.Tensor, 
+                               reconstructed_mask: torch.Tensor,
+                               ):
         """
         Computes the combined reconstruction loss for values and mask.
 
@@ -302,8 +322,6 @@ class MaskedAutoEncoder:
             reconstruction (torch.Tensor): Reconstructed data of shape [N_samples, max_model_dim].
             input_mask (torch.Tensor): Original NaN mask of shape [N_samples, max_model_dim].
             reconstructed_mask (torch.Tensor): Reconstructed NaN mask.
-            mean (torch.Tensor, optional): Mean of the latent space. Defaults to None. It is ignored unless using a VAE.
-            logvar (torch.Tensor, optional): Log-variance of the latent space. Defaults to None. It is ignored unless using a VAE.
 
         Returns:
             loss (torch.Tensor): Combined reconstruction loss.
@@ -340,16 +358,21 @@ class MaskedAutoEncoder:
         Train the autoencoder model.
 
         Args:
+            train_loader (DataLoader): DataLoader for training data.
+            val_loader (DataLoader): DataLoader for validation data.
+            test_tensor (torch.Tensor, optional): Test data for diagnostics. Defaults to None.
             start_epoch (int, optional): The epoch to start training from. Defaults to 0.
             epochs (int, optional): The number of epochs to train for. Defaults to 1000.
             lr (float, optional): The learning rate for the optimizer. Defaults to 1e-3.
             weight_decay (float, optional): L2 regularization strength. Defaults to 0.0.
+            lambda_L1 (float, optional): L1 regularization strength. Defaults to 0.0.
             early_stopping (bool | Callable, optional): If True, use early stopping with default parameters.
                 If a callable is provided, it will be used as the early stopping function. Defaults to False.
             stopping_kwargs (Optional[dict], optional): Additional arguments for the early stopping function. Defaults to {}.
             path (str, optional): The directory path to save the model and diagnostics. Defaults to './'.
             filename (str, optional): The filename to save the trained model. Defaults to 'autoencoder.pth'.
         """        
+
         if test_tensor is not None:
             self.test_tensor = test_tensor.to(self.device)
             self.test_array = clean_chain(test_tensor.cpu().detach().numpy())
@@ -382,6 +405,7 @@ class MaskedAutoEncoder:
             epochs = start_epoch + epochs
         
         optimizer = torch.optim.Adam(list(self.encoder.parameters()) + list(self.decoder.parameters()), lr=lr, weight_decay=weight_decay)
+        
         if val_loader:
             scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 
                                                                 factor=0.5,
@@ -424,12 +448,37 @@ class MaskedAutoEncoder:
         self.trained = True
         self._save_model(trainedpath)
             
-    def reparameterize(self, mean, logvar):
+    def reparameterize(self, 
+                       mean: torch.Tensor, 
+                       logvar: torch.Tensor
+                       ):
+        """
+        Reparameterization trick for the VAE.
+        
+        Args:
+            mean (torch.Tensor): Mean of the latent space.
+            logvar (torch.Tensor): Log-variance of the latent space.
+        
+        Returns:
+            reparametrized (torch.Tensor): Reparameterized latent space.
+        """
+
         std = torch.exp(0.5 * logvar)
         eps = torch.randn_like(std)
         return mean + eps * std
     
     def get_z_vae(self, x, mask):
+        """
+        Get the latent representation of the input data using the VAE.
+
+        Args:
+            x (torch.Tensor): Input data of shape [N_samples, max_model_dim].
+            mask (torch.Tensor): Mask indicating valid dimensions (1 = valid, 0 = invalid).
+        
+        Returns:
+            out (tuple[torch.Tensor, torch.Tensor, torch.Tensor]): Latent representation, mean, and log-variance.
+        """
+
         mean, logvar = self.encoder(x, mask)
         z = self.reparameterize(mean, logvar)
 
@@ -439,7 +488,11 @@ class MaskedAutoEncoder:
         z = self.encoder(x, mask)
         return z, None, None
 
-    def _train_one_epoch(self, train_loader, optimizer, lambda_L1):
+    def _train_one_epoch(self, 
+                         train_loader: DataLoader, 
+                         optimizer: torch.optim.Optimizer, 
+                         lambda_L1: float
+                         ) -> float:
         """
         Perform a training step for one epoch.
 
@@ -481,7 +534,10 @@ class MaskedAutoEncoder:
         
         return train_loss / len(train_loader)
 
-    def _validate_one_epoch(self, val_loader, lambda_L1):
+    def _validate_one_epoch(self, 
+                            val_loader: DataLoader, 
+                            lambda_L1: float
+                            ):
         """
         Perform a validation step for one epoch.
 
@@ -517,7 +573,16 @@ class MaskedAutoEncoder:
 
         return val_loss / len(val_loader)
     
-    def _log_epoch(self, epoch, train_loss, val_loss, epochs_losses, train_losses, val_losses, savepath, ndim=15):
+    def _log_epoch(self, 
+                   epoch: int, 
+                   train_loss: float, 
+                   val_loss: float, 
+                   epochs_losses: list, 
+                   train_losses: list, 
+                   val_losses: list, 
+                   savepath: str, 
+                   ndim: int = 15
+                   ):
         """
         Logs the training and validation loss for a given epoch and updates the loss lists.
 
@@ -529,6 +594,7 @@ class MaskedAutoEncoder:
             train_losses (list): A list to store the training losses.
             val_losses (list): A list to store the validation losses.
             savepath (str): The directory path where the loss plot will be saved.
+            ndim (int, optional): The number of dimensions to plot in the corner plot. Defaults to 15.
         """
 
         if val_loss is not None:
@@ -610,6 +676,7 @@ class MaskedAutoEncoder:
         Returns:
             torch.Tensor: Decoded data of shape [N_samples, max_model_dim].
         """
+
         self.decoder.eval()
         with torch.no_grad():
             reconstructed_data, reconstructed_mask =  self.decoder(latent)

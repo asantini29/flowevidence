@@ -33,8 +33,6 @@ class FlowContainer:
     A container for managing and training a flow-based model.
     
     Args:
-        num_flow_steps (int): Number of flow steps in the model. Default is 5.
-        use_nvp (bool): Whether to use RealNVP architecture. Default is False.
         device (Union[str, torch.device]): Device to run the model on. Default is 'cpu'.
         dtype (torch.dtype): Data type for tensors. Default is torch.float64.
         verbose (bool): Whether to print verbose output during training. Default is False.
@@ -205,6 +203,17 @@ class FlowContainer:
         self._save_diagnostics(epochs_losses, train_losses, val_losses, target_distribution, savepath)
 
     def _train_one_epoch(self, optimizer, lambdaL2):
+        """
+        Train the flow model for one epoch.
+
+        Args:
+            optimizer (torch.optim.Optimizer): The optimizer to use for training.
+            lambdaL2 (Optional[float]): The L2 regularization parameter. Defaults to None.
+        
+        Returns:
+            float: The average training loss for the epoch.
+        """
+
         self.flow.train()
         train_loss = 0
         Nbatches = 0 #number of batches that are not nan or inf
@@ -224,6 +233,16 @@ class FlowContainer:
         return train_loss / max(1, Nbatches)
 
     def _validate_one_epoch(self, lambdaL2):
+        """
+        Validate the flow model for one epoch.
+
+        Args:
+            lambdaL2 (Optional[float]): The L2 regularization parameter. Defaults to None.
+
+        Returns:
+            float: The average validation loss for the epoch.
+        """
+
         self.flow.eval()
         val_loss = 0
         Nbatches = 0 #number of batches that are not nan or inf
@@ -241,6 +260,20 @@ class FlowContainer:
         return val_loss / max(1, Nbatches)
 
     def _log_epoch(self, epoch, train_loss, val_loss, epochs_losses, train_losses, val_losses, target_distribution, savepath):
+        """
+        Log the training and validation losses for the epoch.
+
+        Args:
+            epoch (int): The current epoch.
+            train_loss (float): The training loss for the epoch.
+            val_loss (float): The validation loss for the epoch.
+            epochs_losses (list): List of epochs.
+            train_losses (list): List of training losses.
+            val_losses (list): List of validation losses.
+            target_distribution (np.ndarray): The target distribution for diagnostics.
+            savepath (str): The path to save the diagnostics.
+        """
+
         if val_loss is not None:
             logging.info(f'Epoch {epoch}, Train Loss: {train_loss}, Val Loss: {val_loss}')
         else:
@@ -253,6 +286,16 @@ class FlowContainer:
         self._save_diagnostics(epochs_losses, train_losses, val_losses, target_distribution, savepath)
 
     def _save_model(self, epochs, optimizer, scheduler, trainedpath):
+        """
+        Save the trained model.
+
+        Args:
+            epochs (int): The number of epochs trained.
+            optimizer (torch.optim.Optimizer): The optimizer used for training.
+            scheduler (torch.optim.lr_scheduler): The learning rate scheduler.
+            trainedpath (str): The path to save the trained model.
+        """
+
         savedict = {
             'epoch': epochs,
             'model_state_dict': self.flow.state_dict(),
@@ -262,6 +305,17 @@ class FlowContainer:
         torch.save(savedict, trainedpath)
 
     def _save_diagnostics(self, epochs_losses, train_losses, val_losses, target_distribution, savepath, ndim=10):
+        """
+        Save diagnostics for the trained model.
+
+        Args:
+            epochs_losses (list): List of epochs.
+            train_losses (list): List of training losses.
+            val_losses (list): List of validation losses.
+            target_distribution (np.ndarray): The target distribution for diagnostics.
+            savepath (str): The path to save the diagnostics.
+            ndim (int, optional): The number of dimensions to plot. Defaults to 10.
+        """
         
         Nsamples = target_distribution.shape[0] if target_distribution is not None else 1000
         Nsamples = min(Nsamples, 1000)
@@ -302,16 +356,20 @@ class EvidenceFlow(FlowContainer):
     A class for computing the log evidence (logZ) using a trained flow model and the posterior values associated with MCMC samples.
 
     Args:
-        num_flow_steps (int): Number of flow steps. Defaults to 5.
-        use_nvp (bool, optional): Whether to use NVP (Neural Variational Processes). Defaults to False.
-        device (str or torch.device, optional): Device to use for computation. Defaults to 'cpu'.
-        verbose (bool, optional): Whether to print verbose output. Defaults to False.
-        posterior_samples (np.ndarray or dict, optional): Posterior samples. Defaults to None.
-        logposterior_values (np.ndarray, optional): logPosterior values. Defaults to None.
-        dtype (torch.dtype, optional): Data type for tensors. Defaults to torch.float64.
-        Nbatches (int, optional): Number of batches. Defaults to 1.
-        split_ratio (float, optional): Ratio to split data into training and validation sets. Defaults to 0.8.
-        conversion_method (str, optional): Method for data conversion to the flow latent space ('normalize' or 'standardize'). Defaults to 'normalize'.
+        posterior_samples (np.ndarray or dict): The posterior samples to use for training the flow model. If a dictionary, the values are concatenated along the last axis.
+        logposterior_values (np.ndarray): The log posterior values associated with the posterior samples.
+        num_flow_steps (int): Number of flow steps in the model. Default is 16.
+        transform_type (str): The type of transformation to use. Default is 'nvp'.
+        transform_kwargs (dict): Additional keyword arguments for the transformation. Default is {}.
+        device (str or torch.device): Device to run the model on. Default is 'cpu'.
+        verbose (bool): Whether to print verbose output during training. Default is False.
+        dtype (torch.dtype): Data type for tensors. Default is torch.float64.
+        Nbatches (int): Number of batches. Default is 1.
+        split_ratio (float): Ratio to split data into training and validation sets. Default is 0.8.
+        conversion_method (str): Method for data conversion to the flow latent space ('normalize_minmax' or 'normalize_gaussian'). 
+                                 Default is 'normalize_minmax'.    
+        autoencoder (nn.Module): An autoencoder to encode the training and validation samples. Default is None.
+        train_autoencoder_kwargs (dict): Keyword arguments for training the autoencoder. Default is {}.
     
     Methods:
         _setup_conversions(conversion_method):
@@ -367,7 +425,7 @@ class EvidenceFlow(FlowContainer):
         Sets up the conversion methods for transforming data to and from latent space.
         
         Args:
-            conversion_method (str): The method to use for conversion. Must be one of 'normalize' or 'standardize'.
+            conversion_method (str): The method to use for conversion. Must be one of 'normalize_minmax' or 'normalize_gaussian'.
         
         Raises:
             ValueError: If an invalid conversion method is provided.
@@ -438,9 +496,9 @@ class EvidenceFlow(FlowContainer):
         self.load_data(train_loader, val_loader)
 
     def _sanity_check_autoencoder(self, 
-                                  train_loader, 
-                                  val_loader,
-                                  training_kwargs
+                                  train_loader: DataLoader, 
+                                  val_loader: DataLoader,
+                                  training_kwargs: dict
                                   ):
         """
         Checks if the autoencoder is trained and trains it if necessary.
@@ -450,6 +508,7 @@ class EvidenceFlow(FlowContainer):
             val_loader (DataLoader): The validation samples to train the autoencoder on.
             training_kwargs (dict): Keyword arguments for training the autoencoder.
         """
+
         filename = self.train_autoencoder_kwargs.get('filename', 'autoencoder.pth')
         if os.path.exists(training_kwargs['path'] + filename):
             logging.info("Loading autoencoder")
@@ -466,7 +525,10 @@ class EvidenceFlow(FlowContainer):
             logging.info("Autoencoder trained")
 
 
-    def _encode_tensors(self, train_tensor, val_tensor):
+    def _encode_tensors(self, 
+                        train_tensor: torch.Tensor, 
+                        val_tensor: Optional[torch.Tensor] = None
+                        ):
         """
         Encodes the training and validation samples using the autoencoder. If the autoencoder is not trained, it will be trained. If the autoencoder is not provided, the samples are returned as is.
         
@@ -507,7 +569,11 @@ class EvidenceFlow(FlowContainer):
         
         return mean, std
     
-    def get_draws(self, load_kwargs: dict = {}, train_kwargs: dict = {}, num_draws: int = 10000):
+    def get_draws(self, 
+                  load_kwargs: dict = {}, 
+                  train_kwargs: dict = {}, 
+                  num_draws: int = 10000
+                  ):
         """
         Draw samples from the trained flow model. If no model is loaded or trained, it will be trained.
 
@@ -529,7 +595,10 @@ class EvidenceFlow(FlowContainer):
 
         return converted
     
-    def _sanity_check_flow(self, load_kwargs: dict = {}, train_kwargs: dict = {}):
+    def _sanity_check_flow(self, 
+                           load_kwargs: dict = {}, 
+                           train_kwargs: dict = {}
+                           ):
         """
         Checks if the flow model is loaded or trained and loads or trains it if necessary.
         
@@ -566,14 +635,17 @@ class ErynEvidenceFlow(EvidenceFlow):
         samples_file (str): The file to save the samples and logP values to. Default is './samples.h5'.
         ess (int): The effective sample size. Default is 1e4.
         leaves_to_ndim (bool): Whether to reshape the leaves to ndim. Default is False.
-        num_flow_steps (int): Number of flow steps in the model. Default is 5.
-        use_nvp (bool): Whether to use NVP architecture. Default is False.
+        num_flow_steps (int): Number of flow steps in the model. Default is 16.
+        transform_type (str): The type of transformation to use. Default is 'nvp'.
+        transform_kwargs (dict): Additional keyword arguments for the transformation. Default is {}.
         device (str or torch.device): Device to run the model on. Default is 'cpu'.
         verbose (bool): Whether to print verbose output during training. Default is False.
         dtype (torch.dtype): Data type for tensors. Default is torch.float64.
         Nbatches (int): Number of batches. Default is 1.
         split_ratio (float): Ratio to split data into training and validation sets. Default is 0.8.
         conversion_method (str): Method for data conversion to the flow latent space ('normalize_minmax' or 'normalize_gaussian'). Default is 'normalize_minmax'.
+        autoencoder (nn.Module): An autoencoder to encode the training and validation samples. Default is None.
+        train_autoencoder_kwargs (dict): Keyword arguments for training the autoencoder. Default is {}.
     """
 
     def __init__(self,
@@ -647,7 +719,10 @@ class ErynEvidenceFlow(EvidenceFlow):
                          train_autoencoder_kwargs=train_autoencoder_kwargs
                          )
         
-    def _compute_discard_thin(self, samples, ess=int(1e4)):
+    def _compute_discard_thin(self, 
+                              samples: dict, 
+                              ess: int = int(1e4)
+                              ):
         """
         Compute the number of samples to discard and thin. Snippet adapted from from: `https://github.com/asantini29/pysco`
 
@@ -683,7 +758,11 @@ class ErynEvidenceFlow(EvidenceFlow):
 
         return discard, thin
     
-    def _load_samples_posterior(self, backend, ess=None, leaves_to_ndim=False):
+    def _load_samples_posterior(self, 
+                                backend: HDFBackend, 
+                                ess: int = None, 
+                                leaves_to_ndim: bool = False
+                                ):
         """
         Load the samples from the backend. If the effective sample size is provided, the number of samples to discard and thin is computed.
         This is NOT compatible with reversible jump MCMC yet.
@@ -691,6 +770,7 @@ class ErynEvidenceFlow(EvidenceFlow):
         Args:
             backend (HDFBackend): The backend to load the samples from.
             ess (int, optional): The effective sample size. Defaults to None.
+            leaves_to_ndim (bool, optional): Whether to reshape the leaves to ndim. Defaults to False.
 
         Returns:
             samples_out (dict): The samples.
