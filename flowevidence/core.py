@@ -67,18 +67,20 @@ class FlowContainer:
 
     def build_flow(self, 
                    num_dims: int,
-                   num_flow_steps: int = 5,
-                   transform_type: str = 'maf',
+                   num_flow_steps: int = 16,
+                   transform_type: str = 'nvp',
                    transform_kwargs: dict = {},
                    ):
         """
         Builds the flow model using the specified parameters.
         This method initializes the flow model by calling the `get_flow` function with the 
-        number of dimensions, number of flow steps, whether to use NVP (Non-volume Preserving) 
-        transformations, and the device to be used for computation.
+        number of dimensions, number of flow steps, type of transformation, and device to be used for computation.
 
         Args:  
             num_dims (int): The number of dimensions for the flow model.
+            num_flow_steps (int): The number of flow steps in the model. Default is 16.
+            transform_type (str): The type of transformation to use. Default is 'nvp'.
+            transform_kwargs (dict): Additional keyword arguments for the transformation. Default is {}.
         """
 
         self.flow = get_flow(num_dims, 
@@ -103,6 +105,7 @@ class FlowContainer:
               start_epoch: int = 0, 
               epochs: int = 1000, 
               lr: float = 1e-3, 
+              weight_decay: float = 0.0,
               lambdaL2: Optional[float] = None,
               early_stopping: bool | Callable = False,
               stopping_kwargs: Optional[dict] = {},
@@ -117,6 +120,7 @@ class FlowContainer:
             start_epoch (int, optional): The starting epoch for training. Defaults to 0.
             epochs (int, optional): The number of epochs to train the model. Defaults to 1000.
             lr (float, optional): The learning rate for the optimizer. Defaults to 1e-3.
+            weight_decay (float, optional): The weight decay for the optimizer. Defaults to 0.0.
             lambdaL2 (Optional[float], optional): The L2 regularization parameter. Defaults to None.
             early_stopping (Optional[bool], optional): Whether to use early stopping. Defaults to False.
             stopping_kwargs (Optional[dict], optional): Keyword arguments for early stopping. Defaults to {}.
@@ -127,14 +131,17 @@ class FlowContainer:
 
         logging.info("Training flow for {} epochs".format(epochs - start_epoch))
         
-        optimizer = torch.optim.Adam(self.flow.parameters(), lr=lr)
+        optimizer = torch.optim.Adam(self.flow.parameters(), lr=lr, weight_decay=weight_decay)
         if self.val_loader:
             scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 
-                                                                patience=10,
+                                                                factor=0.5,
+                                                                patience=50,
                                                                 threshold=1e-4)
                                                                 
         else:
             scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=100, gamma=0.5)
+
+        current_lr = lr
 
         epochs_losses = []
         train_losses = []
@@ -178,6 +185,9 @@ class FlowContainer:
             if epoch  > 0 and epoch % 100 == 0:
                 if self.verbose:
                     self._log_epoch(epoch, train_loss, val_loss, epochs_losses, train_losses, val_losses, target_distribution, savepath)
+                    if scheduler.get_last_lr()[0] != current_lr:
+                        current_lr = scheduler.get_last_lr()[0]
+                        logging.info(f"New learning rate: {scheduler.get_last_lr()[0]}")
                     logging.info("Saving model @ epoch {}".format(epoch))
 
                 self._save_model(epoch, optimizer, scheduler, trainedpath)
@@ -186,34 +196,49 @@ class FlowContainer:
             logging.warning("Early stopping did not trigger")
 
         self._save_model(epochs, optimizer, scheduler, trainedpath)
+        logging.debug("Training finished")
+        
+        logging.debug("Saving diagnostics")
+        epochs_losses.append(epoch)
+        train_losses.append(train_loss)
+        val_losses.append(val_loss)
         self._save_diagnostics(epochs_losses, train_losses, val_losses, target_distribution, savepath)
 
     def _train_one_epoch(self, optimizer, lambdaL2):
         self.flow.train()
         train_loss = 0
+        Nbatches = 0 #number of batches that are not nan or inf
         for batch in self.train_loader:
             batch = batch[0].to(self.device, non_blocking=self.device.type == 'cuda')
             optimizer.zero_grad()
             #breakpoint()
-            loss = loss_fn(self.flow, batch)
+            #loss = loss_fn(self.flow, batch)
+            loss = self.flow.forward_kld(batch)
             l2_reg = l2_regularization(self.flow, lambdaL2) if lambdaL2 else 0
             loss = loss + l2_reg
-            loss.backward()
-            optimizer.step()
-            train_loss += loss.item()
-        return train_loss / len(self.train_loader)
+            if ~(torch.isnan(loss) | torch.isinf(loss)):
+                loss.backward()
+                optimizer.step()
+                train_loss += loss.item()
+                Nbatches += 1
+        return train_loss / max(1, Nbatches)
 
     def _validate_one_epoch(self, lambdaL2):
         self.flow.eval()
         val_loss = 0
+        Nbatches = 0 #number of batches that are not nan or inf
         with torch.no_grad():
             for batch in self.val_loader:
                 batch = batch[0].to(self.device, non_blocking=self.device.type == 'cuda')
-                loss = loss_fn(self.flow, batch)
+                loss = self.flow.forward_kld(batch) #loss_fn(self.flow, batch)
                 l2_reg = l2_regularization(self.flow, lambdaL2) if lambdaL2 else 0
                 loss = loss + l2_reg
-                val_loss += loss.item()
-        return val_loss / len(self.val_loader)
+                if ~(torch.isnan(loss) | torch.isinf(loss)):
+                    val_loss += loss.item()
+                    Nbatches += 1
+                # else:
+                #     breakpoint()
+        return val_loss / max(1, Nbatches)
 
     def _log_epoch(self, epoch, train_loss, val_loss, epochs_losses, train_losses, val_losses, target_distribution, savepath):
         if val_loss is not None:
@@ -225,9 +250,7 @@ class FlowContainer:
         train_losses.append(train_loss)
         val_losses.append(val_loss)
 
-        samples_here = self.flow.sample(10000).cpu().detach().numpy()
-        cornerplot_training(samples_here, target_distribution, epoch=epoch, plot_dir=savepath, savename=f'flow_cornerplot')
-        lossplot(epochs_losses, train_losses, val_losses, plot_dir=savepath, savename='flow_loss')
+        self._save_diagnostics(epochs_losses, train_losses, val_losses, target_distribution, savepath)
 
     def _save_model(self, epochs, optimizer, scheduler, trainedpath):
         savedict = {
@@ -238,14 +261,21 @@ class FlowContainer:
         }
         torch.save(savedict, trainedpath)
 
-    def _save_diagnostics(self, epochs_losses, train_losses, val_losses, target_distribution, savepath):
-        logging.debug("Training finished")
-        logging.debug("Saving diagnostics")
-        if self.verbose:
-            samples_here = self.flow.sample(10000).cpu().detach().numpy()
-            cornerplot_training(samples_here, target_distribution, epoch=epochs_losses[-1], plot_dir=savepath, savename=f'cornerplot_epoch_{epochs_losses[-1]}')
-            lossplot(epochs_losses, train_losses, val_losses, plot_dir=savepath, savename='losses')
-            logging.debug("Diagnostics saved")
+    def _save_diagnostics(self, epochs_losses, train_losses, val_losses, target_distribution, savepath, ndim=10):
+        
+        Nsamples = target_distribution.shape[0] if target_distribution is not None else 1000
+        Nsamples = min(Nsamples, 1000)
+
+        samples_here, log_prob = self.flow.sample(Nsamples)
+        samples_here = samples_here.cpu().detach().numpy()
+
+        lossplot(epochs_losses, train_losses, val_losses, plot_dir=savepath, savename='flow_loss')
+        try:
+            cornerplot_training(samples_here[:, :ndim], target_distribution[:, :ndim], epoch=epochs_losses[-1], plot_dir=savepath, savename=f'flow_cornerplot')
+        except Exception as e:
+            logging.error(f"Error plotting cornerplot: {e}")
+
+        logging.debug("Diagnostics saved")
 
     def load(self, path: str = './', filename: str = 'trainedflow.pth'):
         """
@@ -297,19 +327,24 @@ class EvidenceFlow(FlowContainer):
     def __init__(self, 
                  posterior_samples: np.ndarray | dict = None,
                  logposterior_values: np.ndarray = None,
-                 num_flow_steps: int = 5, 
-                 use_nvp: bool = False, 
+                 num_flow_steps: int = 16, 
+                 transform_type: str = 'nvp',
+                 transform_kwargs: dict = {},
                  device: str | torch.device = 'cpu', 
                  verbose: bool = False,
                  dtype: torch.dtype = torch.float64,
                  Nbatches: int = 1,
                  split_ratio: float = 0.8,
-                 conversion_method: str = 'normalize', #todo change names
+                 conversion_method: str = 'normalize_minmax',
                  autoencoder: nn.Module = None,
                  train_autoencoder_kwargs: dict = {},
                  ):
         
-        super().__init__(num_flow_steps, use_nvp, device, dtype, verbose)
+        super().__init__(device, dtype, verbose)
+
+        self.num_flow_steps = num_flow_steps
+        self.transform_type = transform_type
+        self.transform_kwargs = transform_kwargs
         
         self.split_ratio = split_ratio
         self._setup_conversions(conversion_method)
@@ -338,14 +373,14 @@ class EvidenceFlow(FlowContainer):
             ValueError: If an invalid conversion method is provided.
         """
 
-        if conversion_method == 'minmax':
+        if conversion_method == 'normalize_minmax':
             self._to_latent_space = normalize_minmax
             self._from_latent_space = denormalize_minmax
-        elif conversion_method == 'gaussian':    
+        elif conversion_method == 'normalize_gaussian':    
             self._to_latent_space = normalize_gaussian
             self._from_latent_space = normalize_gaussian
         else:
-            raise ValueError(f"Invalid conversion method: {conversion_method}. Choose from 'normalize' or 'standardize'.")
+            raise ValueError(f"Invalid conversion method: {conversion_method}. Choose from 'normalize_minmax' or 'normalize_gaussian'.")
     
     def _process_posterior_samples(self, posterior_samples):
         """
@@ -385,6 +420,7 @@ class EvidenceFlow(FlowContainer):
         
         latent_samples, self.q1, self.q2 = self._to_latent_space(self.posterior_samples)
         self.latent_target = latent_samples.to(self.device)
+        #breakpoint()
 
         shuffled_samples = shuffle(latent_samples)
         if self.split_ratio:
@@ -393,8 +429,11 @@ class EvidenceFlow(FlowContainer):
             train_samples, val_samples = shuffled_samples, None
 
         train_loader, val_loader = create_data_loaders(train_samples, val_samples, batch_size=self.batch_size, num_workers=0, pin_memory=self.device.type == 'cuda')
-
-        train_loader, val_loader = self._encode_tensors(train_loader, val_loader, self.train_autoencoder_kwargs)
+        
+        if self.autoencoder:
+            self._sanity_check_autoencoder(train_loader, val_loader, self.train_autoencoder_kwargs)
+            train_samples, val_samples = self._encode_tensors(train_samples, val_samples)
+            train_loader, val_loader = create_data_loaders(train_samples, val_samples, batch_size=self.batch_size, num_workers=0, pin_memory=self.device.type == 'cuda')
 
         self.load_data(train_loader, val_loader)
 
@@ -411,6 +450,12 @@ class EvidenceFlow(FlowContainer):
             val_loader (DataLoader): The validation samples to train the autoencoder on.
             training_kwargs (dict): Keyword arguments for training the autoencoder.
         """
+        filename = self.train_autoencoder_kwargs.get('filename', 'autoencoder.pth')
+        if os.path.exists(training_kwargs['path'] + filename):
+            logging.info("Loading autoencoder")
+            self.autoencoder.load_model(path=training_kwargs['path'] + filename)
+        else:
+            logging.info("Autoencoder not found")
 
         if self.autoencoder.trained:
             # check if autoencoder is trained. If not, train it
@@ -421,22 +466,21 @@ class EvidenceFlow(FlowContainer):
             logging.info("Autoencoder trained")
 
 
-    def _encode_tensors(self, train_loader, val_loader, training_kwargs):
+    def _encode_tensors(self, train_tensor, val_tensor):
         """
         Encodes the training and validation samples using the autoencoder. If the autoencoder is not trained, it will be trained. If the autoencoder is not provided, the samples are returned as is.
         
         Args:
-            train_loader (torch.Tensor): The training samples to train the autoencoder on.
-            val_loader (torch.Tensor): The validation samples to train the autoencoder on.
+            train_loader (DataLoader): The training samples to train the autoencoder on.
+            val_loader (DataLoader): The validation samples to train the autoencoder on.
             training_kwargs (dict): Keyword arguments for training the autoencoder.
         """
-        if self.autoencoder:
-            self._sanity_check_autoencoder(train_loader, val_loader, training_kwargs)
-            train_loader = self.autoencoder.encode(train_loader)
-            val_loader = self.autoencoder.encode(val_loader)
-            self.latent_target = self.autoencoder.encode(self.latent_target)
+        train_tensor = self.autoencoder.encode(train_tensor.to(self.device)).to('cpu')
+        if val_tensor is not None:
+            val_tensor = self.autoencoder.encode(val_tensor.to(self.device)).to('cpu')
+        self.latent_target = self.autoencoder.encode(self.latent_target)
         
-        return train_loader, val_loader
+        return train_tensor, val_tensor
             
 
     def get_logZ(self,
@@ -476,7 +520,7 @@ class EvidenceFlow(FlowContainer):
             samples (np.ndarray): The drawn samples transformed in the original space.
         """
         self._sanity_check_flow(load_kwargs, train_kwargs)
-        samples = self.flow.sample(num_draws).cpu().detach().numpy()
+        samples, log_prob = self.flow.sample(num_draws).cpu().detach().numpy()
 
         if self.autoencoder:
             samples = self.autoencoder.decode(samples)
@@ -495,7 +539,7 @@ class EvidenceFlow(FlowContainer):
         """
         if not hasattr(self, 'flow'):
             logging.info("Building flow")
-            self.build_flow(self.num_dims)
+            self.build_flow(self.num_dims, self.num_flow_steps, self.transform_type, self.transform_kwargs)
         
         load = self.load(**load_kwargs)
         train_kwargs_here = train_kwargs.copy()
@@ -521,7 +565,7 @@ class ErynEvidenceFlow(EvidenceFlow):
         loader (SamplesLoader): A pysco.eryn.SamplesLoader object to load the samples from.
         samples_file (str): The file to save the samples and logP values to. Default is './samples.h5'.
         ess (int): The effective sample size. Default is 1e4.
-        leave_to_ndim (bool): Whether to reshape the leaves to ndim. Default is False.
+        leaves_to_ndim (bool): Whether to reshape the leaves to ndim. Default is False.
         num_flow_steps (int): Number of flow steps in the model. Default is 5.
         use_nvp (bool): Whether to use NVP architecture. Default is False.
         device (str or torch.device): Device to run the model on. Default is 'cpu'.
@@ -529,7 +573,7 @@ class ErynEvidenceFlow(EvidenceFlow):
         dtype (torch.dtype): Data type for tensors. Default is torch.float64.
         Nbatches (int): Number of batches. Default is 1.
         split_ratio (float): Ratio to split data into training and validation sets. Default is 0.8.
-        conversion_method (str): Method for data conversion to the flow latent space ('normalize_minmax' or 'normalize_gaussian'). Default is 'normalize'.
+        conversion_method (str): Method for data conversion to the flow latent space ('normalize_minmax' or 'normalize_gaussian'). Default is 'normalize_minmax'.
     """
 
     def __init__(self,
@@ -537,17 +581,18 @@ class ErynEvidenceFlow(EvidenceFlow):
                 loader: SamplesLoader = None,
                 samples_file: h5py.File = './samples.h5',
                 ess: int = int(1e4),
-                leave_to_ndim: bool = False,
-                num_flow_steps: int = 5, 
-                use_nvp: bool = False, 
+                leaves_to_ndim: bool = False,
+                num_flow_steps: int = 16, 
+                transform_type: str = 'nvp',
+                transform_kwargs: dict = {},
                 device: str | torch.device = 'cpu', 
                 verbose: bool = False,
                 dtype: torch.dtype = torch.float64,
                 Nbatches: int = 1,
                 split_ratio: float = 0.8,
-                conversion_method: str = 'normalize_minmax'):
-        
-        
+                conversion_method: str = 'normalize_minmax',
+                autoencoder: nn.Module = None,
+                train_autoencoder_kwargs: dict = {}):
         
         if not eryn_here:
             raise ImportError("Eryn is not installed. Please install Eryn to use this class, or \
@@ -555,8 +600,12 @@ class ErynEvidenceFlow(EvidenceFlow):
         
         if os.path.exists(samples_file):
             with h5py.File(samples_file, 'r') as f:
-                samples = f['samples'][:]
-                logP = f['logP'][:]
+                results = f['results']
+                samples_group = results['samples']
+                samples = {}
+                for key in samples_group.keys():
+                    samples[key] = samples_group[key][:]
+                logP = results['logP'][:]
         else:
             if backend is None and loader is None:
                 raise ValueError("Either a backend or a loader must be provided.")
@@ -564,31 +613,39 @@ class ErynEvidenceFlow(EvidenceFlow):
             elif loader is None and backend is not None:
                 if pysco_here:
                     loader = SamplesLoader(backend)
-                    samples, logL, logP = loader.load(ess=ess, squeeze=True, leaves_to_ndim=leave_to_ndim)
+                    samples, logL, logP = loader.load(ess=ess, squeeze=False, leaves_to_ndim=leaves_to_ndim)
                 else:
                     if isinstance(backend, str):
                         backend = HDFBackend(backend)
 
-                    samples, logP = self._load_samples_posterior(backend, ess, leaves_to_ndim=leave_to_ndim)
+                    samples, logP = self._load_samples_posterior(backend, ess, leaves_to_ndim=leaves_to_ndim)
             
             else:
-                samples, logL, logP = loader.load(ess=ess, squeeze=True)
+                samples, logL, logP = loader.load(ess=ess, squeeze=False, leaves_to_ndim=leaves_to_ndim)
 
-           # Save the samples and logP to a file
+            # Save the samples and logP to a file
+            os.makedirs(os.path.dirname(samples_file), exist_ok=True)
             with h5py.File(samples_file, 'w') as f:
-                f.create_dataset('samples', data=samples)
-                f.create_dataset('logP', data=logP) 
+                g = f.create_group('results')
+                chain = g.create_group('samples')
+                for key in samples.keys():
+                    chain.create_dataset(key, data=samples[key])
+                g.create_dataset('logP', data=logP)
 
         super().__init__(posterior_samples=samples, 
                          logposterior_values=logP, 
                          num_flow_steps=num_flow_steps, 
-                         use_nvp=use_nvp, 
+                         transform_type=transform_type,
+                         transform_kwargs=transform_kwargs, 
                          device=device, 
                          verbose=verbose, 
                          dtype=dtype, 
                          Nbatches=Nbatches, 
                          split_ratio=split_ratio, 
-                         conversion_method=conversion_method)
+                         conversion_method=conversion_method,
+                         autoencoder=autoencoder,
+                         train_autoencoder_kwargs=train_autoencoder_kwargs
+                         )
         
     def _compute_discard_thin(self, samples, ess=int(1e4)):
         """

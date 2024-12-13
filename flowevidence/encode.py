@@ -329,6 +329,7 @@ class MaskedAutoEncoder:
             start_epoch: int = 0,
             epochs: int = 1000,
             lr: float = 1e-3,
+            weight_decay: float = 0.0,
             lambda_L1: float = 0.0,
             early_stopping: bool | Callable = True,
             stopping_kwargs: Optional[dict] = {},
@@ -342,6 +343,7 @@ class MaskedAutoEncoder:
             start_epoch (int, optional): The epoch to start training from. Defaults to 0.
             epochs (int, optional): The number of epochs to train for. Defaults to 1000.
             lr (float, optional): The learning rate for the optimizer. Defaults to 1e-3.
+            weight_decay (float, optional): L2 regularization strength. Defaults to 0.0.
             early_stopping (bool | Callable, optional): If True, use early stopping with default parameters.
                 If a callable is provided, it will be used as the early stopping function. Defaults to False.
             stopping_kwargs (Optional[dict], optional): Additional arguments for the early stopping function. Defaults to {}.
@@ -379,7 +381,7 @@ class MaskedAutoEncoder:
             logging.info("Resuming training")
             epochs = start_epoch + epochs
         
-        optimizer = torch.optim.Adam(list(self.encoder.parameters()) + list(self.decoder.parameters()), lr=lr)
+        optimizer = torch.optim.Adam(list(self.encoder.parameters()) + list(self.decoder.parameters()), lr=lr, weight_decay=weight_decay)
         if val_loader:
             scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 
                                                                 factor=0.5,
@@ -391,12 +393,9 @@ class MaskedAutoEncoder:
         current_lr = lr
 
         # use tqdm for progress bar only if verbose is True
-        if self.verbose:
-            epochs_range = tqdm(range(start_epoch, epochs))
-        else:
-            epochs_range = range(start_epoch, epochs)
+        epoch_iterator = tqdm(range(start_epoch, epochs), desc="Training", disable=not self.verbose)
 
-        for epoch in epochs_range:
+        for epoch in epoch_iterator:
             
             train_loss = self._train_one_epoch(train_loader=train_loader, optimizer=optimizer, lambda_L1=lambda_L1)
             val_loss = self._validate_one_epoch(val_loader=val_loader, lambda_L1=lambda_L1) if val_loader else None
@@ -518,7 +517,7 @@ class MaskedAutoEncoder:
 
         return val_loss / len(val_loader)
     
-    def _log_epoch(self, epoch, train_loss, val_loss, epochs_losses, train_losses, val_losses, savepath):
+    def _log_epoch(self, epoch, train_loss, val_loss, epochs_losses, train_losses, val_losses, savepath, ndim=15):
         """
         Logs the training and validation loss for a given epoch and updates the loss lists.
 
@@ -554,7 +553,7 @@ class MaskedAutoEncoder:
             
             try:
                 decoded_array = clean_chain(decoded_array)
-                cornerplot_training(samples=decoded_array, target_distribution=self.test_array, epoch=epoch, plot_dir=savepath, savename='autoencoder_cornerplot')
+                cornerplot_training(samples=decoded_array[:, :ndim], target_distribution=self.test_array[:, :ndim], epoch=epoch, plot_dir=savepath, savename='autoencoder_cornerplot')
 
             except ValueError as e:
                 logging.info('Corner plot not generated: {} Resume training'.format(e))

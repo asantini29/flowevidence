@@ -1,20 +1,16 @@
 # coding: utf-8
 
-import os
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
-from nflows.flows import Flow
-from nflows.distributions import StandardNormal
-from nflows.transforms import CompositeTransform, RandomPermutation, ReversePermutation
-from nflows.nn.nets import ResidualNet
+import normflows as nf
 
 import numpy as np
 import matplotlib.pyplot as plt
 from corner import corner
 import logging
-from .trasforms import get_transform
+from .trasforms import get_flow_transforms
 
 def setup_logging(verbose=False):
         """
@@ -206,40 +202,14 @@ def get_flow(num_dims: int,
              transform_type: str = 'maf', 
              transform_kwargs: dict = {},
              device: str | torch.device = 'cpu'
-             ) -> Flow:
+             ) -> nf.NormalizingFlow:
     # Define the base distribution
-    base_distribution = StandardNormal(shape=[num_dims])
+    base_distribution = nf.distributions.DiagGaussian(shape=[num_dims])
 
     # Define the transforms
-    transforms = []
-    transform_class, default_kwargs = get_transform(transform_type)
-    transform_kwargs = {**default_kwargs, **transform_kwargs}
+    flows = get_flow_transforms(num_dims, num_flow_steps, transform_type, transform_kwargs)
 
-    if transform_type == 'nvp':
-        logging.warning("NVP is still under development and may not work as expected.") 
-    else:
-        transform_kwargs['features'] = num_dims
-
-    mask = torch.arange(num_dims) % 2
-
-    if 'mask' in transform_kwargs and transform_kwargs['mask'] is None:
-        transform_kwargs['mask'] = mask 
-    
-    for _ in range(num_flow_steps):
-        #transforms.append(ReversePermutation(features=num_dims))
-        transforms.append(RandomPermutation(features=num_dims))
-        transforms.append(transform_class(**transform_kwargs))
-
-        if transform_type == 'rqs':
-            transforms.append(ReversePermutation(features=num_dims))
-            mask = 1 - mask
-   
-    # Combine the transforms into a composite transform
-    transform = CompositeTransform(transforms)
-
-    # Create the flow model
-    device = torch.device(device) if isinstance(device, str) else device
-    flow = Flow(transform, base_distribution).to(device)
+    flow = nf.NormalizingFlow(q0=base_distribution, flows=flows).to(device)
 
     return flow
 
@@ -297,8 +267,8 @@ def cornerplot_training(samples: np.ndarray,
     color_target = 'k'
     color_samples = "#5790fc"
     if target_distribution is not None:
-        fig = corner(target_distribution, bins=50, color=color_target)
-        fig = corner(samples, bins=50, color=color_samples, fig=fig)
+        fig = corner(target_distribution, bins=50, color=color_target, weights=np.ones(target_distribution.shape[0])/target_distribution.shape[0])
+        fig = corner(samples, bins=50, color=color_samples, weights=np.ones(samples.shape[0])/samples.shape[0], fig=fig)
 
         handles = [
         plt.Line2D([], [], color=color_target, label='Target \n Distribution'),
@@ -356,6 +326,7 @@ def lossplot(epochs: np.ndarray | list,
     plt.close(fig)
 
 def clean_chain(chain):
+
         ndim = chain.shape[1]
         naninds = np.logical_not(np.isnan(chain[:, 0].flatten()))
         samples_out = np.zeros((chain[:,0].flatten()[naninds].shape[0], ndim))  # init the chains to plot\n",
