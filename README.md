@@ -5,7 +5,7 @@
 ## Getting started:
 `flowevidence` estimate the posterior density by training a flow architecture directly on the samples. Then, for each of them, an evidence estimation can be computed as the ratio of the associated unnormalized posterior value and the flow pdf prediction.
 
-The package documentation is available at [this link](TODO). Check out the examples directory for more info (TODO).
+The package documentation is available at [this link](https://asantini29.github.io/flowevidence/). Check out the examples directory for more info (TODO).
 
 ### Prerequisites:
 
