@@ -3,13 +3,13 @@
 `flowevidence` is a Python package that provides evidence estimations from a set of MCMC samples and the associated unnormalized (log-)posterior values. 
 
 ## Getting started:
-`flowevidence` estimate the posterior density by training a flow architecture directly on the samples. Then, for each of them, an evidence estimation can be computed as the ratio of the associated unnormalized posterior value and the flow pdf prediction.
+`flowevidence` estimate the posterior density by training a flow architecture directly on the samples. Then, for each of them, an evidence estimate can be computed as the ratio of the associated unnormalized posterior value and the flow pdf prediction.
 
 The package documentation is available at [this link](https://asantini29.github.io/flowevidence/). Check out the examples directory for more info (TODO).
 
 ### Prerequisites:
 
-flowevidence heavily depends on `pytorch` and `normflows`.
+`flowevidence` heavily depends on `pytorch` and `normflows`.
 
 ## Installing:
 1. Clone the repository:
