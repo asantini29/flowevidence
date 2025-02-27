@@ -13,7 +13,9 @@ nav:
         - api/encode.md
       - Utils: 
         - api/utils.md
-
+      - Transforms:
+        - api/transforms.md
+        
 plugins:
   - search
   - mkdocstrings:

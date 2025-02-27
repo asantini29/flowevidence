@@ -14,11 +14,11 @@ setup(
         ],
     },
     author='Alessandro Santini',
-    author_email='alessandro.santini@aei.mog.de',
+    author_email='alessandro.santini@aei.mpg.de',
     description='A package to compute the evidence of a model using normalizing flows',
     long_description=open('README.md').read(),
     long_description_content_type='text/markdown',
-    url='https://github.com/asantini/flowevidence',
+    url='https://github.com/asantini29/flowevidence',
     classifiers=[
         'Programming Language :: Python :: 3',
         'License :: OSI Approved :: MIT License',
