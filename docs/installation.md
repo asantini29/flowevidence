@@ -1,6 +1,6 @@
 # Installation
 
-## Using pip
+## Using pip (Not available yet)
 ```bash
 pip install flowevidence
 ```
