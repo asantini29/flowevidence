@@ -150,6 +150,10 @@ def get_flow_transforms(num_dims: int,
     Returns the transformation class and its default keyword arguments based on the specified model type.
     
     Args:
+        num_dims (int): The number of dimensions in the input.
+        num_flow_steps (int): The number of flow steps in the transformation.
+        model (str): The model type.
+        extra_kwargs (dict): Additional keyword arguments for the transformation.
         
     Returns:
         transform_class (Transform): The transformation class to use.
