@@ -98,6 +98,23 @@ def normalize_minmax(samples: torch.tensor) -> tuple[torch.tensor: torch.tensor,
     # Return normalized samples, along with the min and range used for normalization
     return normalized_samples, min_values, range_values
 
+def normalize_sigmoid(samples: torch.tensor) -> tuple[torch.tensor: torch.tensor, torch.tensor]:
+    """
+    Normalizes the given samples using the sigmoid function.
+
+    Args:
+        samples (torch.Tensor): A tensor containing the samples to be normalized.
+
+    Returns:
+        normalized_samples (torch.Tensor): The normalized samples.
+        
+    """
+
+    normalized_samples = 1.0 / (1.0 + torch.exp(-samples))
+
+    return normalized_samples, None, None
+
+
 def denormalize_gaussian(samples: torch.tensor, 
                 mean: torch.tensor,
                 std: torch.tensor
@@ -132,6 +149,26 @@ def denormalize_minmax(samples: torch.tensor,
         denormalized_samples (torch.Tensor): The denormalized samples.
     """
     return samples * range + minimum
+
+def denormalize_sigmoid(samples: torch.tensor,
+                        *args,
+                        **kwargs
+                        ) -> torch.tensor:
+    """
+    Denormalizes the given samples using the inverse sigmoid function.
+
+    Args:
+        samples (torch.Tensor): A tensor containing the samples to be denormalized.
+
+    Returns:
+        denormalized_samples (torch.Tensor): The denormalized samples.
+    """
+
+    # Avoid division by zero
+    eps = 1e-6
+    x = torch.clamp(samples, eps, 1.0 - eps)
+    
+    return -torch.log(1.0 / x - 1.0)
 
 def shuffle(samples: torch.tensor) -> torch.tensor:
     """
@@ -350,7 +387,7 @@ class EarlyStopping:
             Checks if the validation loss has improved.
     """
 
-    def __init__(self, patience: int = 50, delta: float = 1e-6):
+    def __init__(self, patience: int = 50, delta: float = 1e-4):
         self.patience = patience
         self.delta = delta
         self.counter = 0

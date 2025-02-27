@@ -133,7 +133,7 @@ class FlowContainer:
         if self.val_loader:
             scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 
                                                                 factor=0.5,
-                                                                patience=50,
+                                                                patience=100,
                                                                 threshold=1e-4)
                                                                 
         else:
@@ -219,6 +219,13 @@ class FlowContainer:
         Nbatches = 0 #number of batches that are not nan or inf
         for batch in self.train_loader:
             batch = batch[0].to(self.device, non_blocking=self.device.type == 'cuda')
+
+            # Check if any samples are at the boundary
+            at_boundary = torch.any(torch.abs(batch) > 0.999, dim=1)
+            if torch.any(at_boundary):
+                # Apply small jitter to boundary points to avoid numerical issues
+                batch = batch + torch.randn_like(batch) * 1e-4
+                
             optimizer.zero_grad()
             #breakpoint()
             #loss = loss_fn(self.flow, batch)
@@ -316,9 +323,9 @@ class FlowContainer:
             savepath (str): The path to save the diagnostics.
             ndim (int, optional): The number of dimensions to plot. Defaults to 10.
         """
-        
-        Nsamples = target_distribution.shape[0] if target_distribution is not None else 1000
-        Nsamples = min(Nsamples, 1000)
+        Nsamples_default = int(1e4)
+        Nsamples = target_distribution.shape[0] if target_distribution is not None else Nsamples_default
+        Nsamples = min(Nsamples, Nsamples_default)
 
         samples_here, log_prob = self.flow.sample(Nsamples)
         samples_here = samples_here.cpu().detach().numpy()
@@ -393,7 +400,7 @@ class EvidenceFlow(FlowContainer):
                  dtype: torch.dtype = torch.float64,
                  Nbatches: int = 1,
                  split_ratio: float = 0.8,
-                 conversion_method: str = 'normalize_minmax',
+                 conversion_method: str = 'minmax',
                  autoencoder: nn.Module = None,
                  train_autoencoder_kwargs: dict = {},
                  ):
@@ -431,15 +438,18 @@ class EvidenceFlow(FlowContainer):
             ValueError: If an invalid conversion method is provided.
         """
 
-        if conversion_method == 'normalize_minmax':
-            self._to_latent_space = normalize_minmax
-            self._from_latent_space = denormalize_minmax
-        elif conversion_method == 'normalize_gaussian':    
-            self._to_latent_space = normalize_gaussian
-            self._from_latent_space = normalize_gaussian
+        allowed_methods = {
+        'minmax': (normalize_minmax, denormalize_minmax),
+        'gaussian': (normalize_gaussian, normalize_gaussian),
+        'sigmoid': (normalize_sigmoid, denormalize_sigmoid),
+        #'logit': (normalize_logit, denormalize_logit)
+    }
+
+        if conversion_method in allowed_methods:
+            self._to_latent_space, self._from_latent_space = allowed_methods[conversion_method]
         else:
-            raise ValueError(f"Invalid conversion method: {conversion_method}. Choose from 'normalize_minmax' or 'normalize_gaussian'.")
-    
+            raise ValueError(f"Invalid conversion method: {conversion_method}. Choose from {list(allowed_methods.keys())}")
+
     def _process_posterior_samples(self, posterior_samples):
         """
         Processes posterior samples by concatenating them if they are in dictionary form 
@@ -633,7 +643,9 @@ class ErynEvidenceFlow(EvidenceFlow):
         backend (str or HDFBackend): The backend to load the samples from.
         loader (SamplesLoader): A pysco.eryn.SamplesLoader object to load the samples from.
         samples_file (str): The file to save the samples and logP values to. Default is './samples.h5'.
-        ess (int): The effective sample size. Default is 1e4.
+        ess (int): The effective sample size. Default is 1e4. It is used to compute the number of samples to discard and thin if they are `None`.
+        discard (int): The number of samples to discard. Default is None.
+        thin (int): The thinning factor. Default is None.
         leaves_to_ndim (bool): Whether to reshape the leaves to ndim. Default is False.
         num_flow_steps (int): Number of flow steps in the model. Default is 16.
         transform_type (str): The type of transformation to use. Default is 'nvp'.
@@ -653,6 +665,8 @@ class ErynEvidenceFlow(EvidenceFlow):
                 loader: SamplesLoader = None,
                 samples_file: h5py.File = './samples.h5',
                 ess: int = int(1e4),
+                discard: int = None,
+                thin: int = None,
                 leaves_to_ndim: bool = False,
                 num_flow_steps: int = 16, 
                 transform_type: str = 'nvp',
@@ -685,7 +699,7 @@ class ErynEvidenceFlow(EvidenceFlow):
             elif loader is None and backend is not None:
                 if pysco_here:
                     loader = SamplesLoader(backend)
-                    samples, logL, logP = loader.load(ess=ess, squeeze=False, leaves_to_ndim=leaves_to_ndim)
+                    samples, logL, logP = loader.load(ess=ess, discard=discard, thin=thin, squeeze=False, leaves_to_ndim=leaves_to_ndim)
                 else:
                     if isinstance(backend, str):
                         backend = HDFBackend(backend)
@@ -693,7 +707,7 @@ class ErynEvidenceFlow(EvidenceFlow):
                     samples, logP = self._load_samples_posterior(backend, ess, leaves_to_ndim=leaves_to_ndim)
             
             else:
-                samples, logL, logP = loader.load(ess=ess, squeeze=False, leaves_to_ndim=leaves_to_ndim)
+                samples, logL, logP = loader.load(ess=ess, discard=discard, thin=thin, squeeze=False, leaves_to_ndim=leaves_to_ndim)
 
             # Save the samples and logP to a file
             os.makedirs(os.path.dirname(samples_file), exist_ok=True)

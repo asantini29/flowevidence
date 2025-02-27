@@ -67,7 +67,8 @@ def get_nvp_transform(num_flow_steps, num_dims, **kwargs):
     if 'layers' in kwargs.keys() and kwargs['layers'] is not None:
         pass
     else:
-        kwargs['layers'] = [num_dims, 2 * num_dims, 2 * num_dims, num_dims] # Default MLP layers
+        hidden_multiplier = kwargs.pop('hidden_multiplier')
+        kwargs['layers'] = [num_dims, hidden_multiplier * num_dims, hidden_multiplier * num_dims, num_dims] # Default MLP layers
 
     flows = []
     for i in range(num_flow_steps):
@@ -122,6 +123,8 @@ def get_tranform_kwargs(model: str):
         'layers': None,
         'leaky': 0.0,
         'init_zeros': True,
+        'hidden_multiplier': 2,
+        'dropout': 0.0,
     }
 
     rqs_dict = {
